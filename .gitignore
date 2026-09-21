@@ -1,0 +1,25 @@
+# Secrets and keys — never commit
+.env
+*.pem
+*.key
+keys/
+secrets/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# Data
+pgdata/
+*.db
+
+# Node (demo UI)
+node_modules/
+
+# OS / editor
+.DS_Store
