@@ -84,7 +84,7 @@ All phases 0–11 complete. Nothing in progress.
   before the AAD check and the Redis claim. Two new error codes
   (`PACKET_EXPIRED`, `PACKET_NOT_YET_VALID`), two new config settings, 24
   new tests. Suite now 322 passing, 0 skipped.
-  Commit `<phase11>` — 2026-09-21
+  Commit `7ba6f16` — 2026-09-21
 
 ## In Progress
 Nothing. The build is complete through Phase 11.
