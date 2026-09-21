@@ -4,7 +4,7 @@ This file is the persistent context across sessions. Read it first,
 every time, before doing anything else.
 
 ## Current Phase
-Phase 5: Dockerize and compose — next
+Phase 6: Load testing — next
 
 ## Completed Phases
 - Phase 0 — Scaffolding: six root docs, folder tree per ARCHITECTURE.md,
@@ -33,11 +33,52 @@ Phase 5: Dockerize and compose — next
   correctness suites in `tests/concurrency/`. 255 tests passing.
   Found and fixed a real gap in the replay defence while writing the
   tamper test (see the AAD assumption below).
-  Commit `<phase4>` — 2026-09-21
+  Commit `a581939` — 2026-09-21
+- Phase 5 — Dockerized services with compose orchestration: a Dockerfile
+  per service, `docker-compose.yml`, `.dockerignore`,
+  `scripts/bootstrap_env.py`, `scripts/verify_compose.sh`, and a new
+  `POST /packets/submit` endpoint on the sender. Whole stack verified
+  running: all four checks in the verification script passed. 263 tests
+  passing.
+  Commit `<phase5>` — 2026-09-21
 
 ## In Progress
-Nothing in flight. Phase 4 closed, Phase 5 (Docker + compose) not yet
+Nothing in flight. Phase 5 closed, Phase 6 (load testing) not yet
 started.
+
+## Running the stack (Phase 5 onward)
+```
+python scripts/bootstrap_env.py     # once; writes .env and .env.infra
+docker compose up --build -d
+./scripts/verify_compose.sh         # asserts the whole flow end to end
+docker compose down                 # add -v to wipe the volumes too
+```
+Host ports are offset so the stack coexists with anything already local:
+Postgres 15432, Redis 16379, RabbitMQ 15672 (management UI 15673),
+sender 18001, mesh_relay 18002, bridge 18003, settlement 18004.
+
+Images: `meshsettle/{sender,mesh_relay,bridge,settlement}:local`. All are
+two-stage builds on `python:3.12.9-slim-bookworm`, run as an unprivileged
+`meshsettle` user (uid 1001), and healthcheck via the interpreter because
+there is no curl in the image. The settlement image also carries
+`migrations/` and `alembic.ini`, and compose reuses it as a one-shot
+`migrate` service (`alembic upgrade head`) that the settlement service
+waits on via `service_completed_successfully`. Using one image for both
+means the migration applied always matches the running code.
+
+`scripts/bootstrap_env.py` writes both env files from one source of truth
+so credentials cannot drift (`--force` to regenerate; that invalidates
+previously signed packets). `.env` holds everything including the PEMs;
+`.env.infra` holds only the Postgres and RabbitMQ credentials, so the
+infrastructure containers never receive private keys.
+
+`scripts/verify_compose.sh` asserts, against the live stack: all services
+healthy and consuming; one payment completes the full journey with the
+exact sealed amount and 2 recorded hops; N concurrent copies produce
+exactly 1 settlement row; corrupted packets are rejected by relay and
+bridge; and settlement independently rejects corrupted packets published
+straight to the queue. Exits non-zero on the first failed assertion.
+Tunable via `DUPLICATES` and `CORRUPTED` env vars.
 
 ## Settlement API reference (for later phases)
 `services/settlement/db.py`:
@@ -253,6 +294,37 @@ fixtures (`KeyBundle` with `.signing_private`, `.signing_public`,
   `/usr/local/opt/python@3.12/bin/python3.12` (3.12.9) for the venv
   instead, so we stay on the specified 3.12 line and still satisfy the
   RULES.md requirement to format with black.
+- **No `${VAR}` interpolation in docker-compose.yml (this bit me for real)**:
+  Compose resolves `${VAR}` from the invoking shell *before* falling back to
+  `.env`. An `export POSTGRES_PASSWORD=...` left over from running Alembic
+  earlier in the session meant Postgres initialized with the stale value
+  while the services authenticated with the one from `.env`, producing
+  `password authentication failed for user "meshsettle"` from the migrate
+  container. Fixed by removing interpolation entirely: every service reads
+  credentials only from an `env_file`. Note `$$` is still needed in the
+  Postgres healthcheck so the variable expands inside the container.
+- **Two env files, generated together**: `.env` (app config plus PEMs) and
+  `.env.infra` (only Postgres/RabbitMQ credentials). The infra containers
+  get the second one, so private keys never land in an environment that
+  `docker inspect` exposes. `scripts/bootstrap_env.py` writes both at once
+  so the passwords cannot drift, and chmods them 600.
+- **`scripts/` directory added**: not in the ARCHITECTURE.md tree, but a
+  fresh clone has no `.env` and therefore cannot start the stack, and the
+  compose verification needs to be reproducible rather than a sequence of
+  ad-hoc commands. Two scripts only: `bootstrap_env.py`, `verify_compose.sh`.
+- **`POST /packets/submit` added to the sender**: TASK.md Phase 5 requires
+  verifying "sender to settled" end to end and Phase 6 requires load
+  testing "through the full pipeline", but the sender previously only
+  created a packet and returned it, leaving the handoff to the caller. A
+  real payer's device does both: seal the instruction, then pass it to a
+  neighbour in range. `POST /packets` (create only) is kept, because the
+  concurrency checks need to submit one identical packet repeatedly.
+- **`tests/integration/results/` added** for compose verification
+  transcripts, same rationale as `tests/concurrency/results/`.
+- **`pyproject.toml` lists service subpackages explicitly**: `packages =
+  ["shared", "services"]` did not include `services.sender` and friends, so
+  `pip install .` inside the image produced a package that could not import
+  its own service modules.
 - **The AAD must be compared against the header explicitly (found by a
   test, and it was a real gap)**: I assumed AES-GCM's AAD authentication
   alone stopped an attacker lifting a sealed envelope onto a different
@@ -418,4 +490,21 @@ fixtures (`KeyBundle` with `.signing_private`, `.signing_public`,
   (49 tests, 49 passed, 20.96s), stamped with the real component versions
   it ran against: Python 3.12.9, PostgreSQL 16.15, Redis 7.4.11,
   RabbitMQ 3.13.7.
+- **Phase 5 compose verification (real stack, all four checks passed)**,
+  raw output in
+  `tests/integration/results/phase5-compose-verification-20260921T140330Z.txt`,
+  run 2026-09-21T14:03:33Z on Docker 29.7.2 / Compose 5.4.0:
+  - all 4 services reported healthy, settlement reported `consuming: true`
+  - one payment submitted via `POST /packets/submit` settled with
+    `amount_minor` exactly 45678 and `hop_count` 2
+  - 25 concurrent copies of one packet → exactly **1** settlement row
+  - 10 corrupted packets → relay returned 400 for all 10; bridge returned
+    400 `INVALID_SIGNATURE`
+  - the same 10 corrupted packets published **directly to RabbitMQ**,
+    bypassing relay and bridge → settlement's `invalid_signature` counter
+    rose by exactly 10, `settled` did not change, and 20 rows accumulated
+    in `rejected_packets`. This is the evidence that settlement verifies
+    independently rather than trusting upstream nodes.
+- Full suite at end of Phase 5: **263 tests, 263 passed, 0 failed**,
+  wall time 38.57s.
 - Load test (Phase 6): not yet run

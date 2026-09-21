@@ -32,7 +32,16 @@ dev = [
 ]
 
 [tool.setuptools]
-packages = ["shared", "services"]
+# Subpackages listed explicitly so `pip install .` inside a container ships
+# every service module, not just the two top-level packages.
+packages = [
+    "shared",
+    "services",
+    "services.sender",
+    "services.mesh_relay",
+    "services.bridge",
+    "services.settlement",
+]
 
 [tool.black]
 line-length = 100

@@ -441,6 +441,25 @@ class PacketCreatedResponse(BaseModel):
         return cls(packet=packet, idempotency_key=packet.idempotency_key)
 
 
+class PacketSubmittedResponse(BaseModel):
+    """Result of creating a packet and handing it to the mesh in one step.
+
+    A real payer's device does both: it seals the instruction, then passes it
+    to whatever neighbour is in range. Exposing that as one call is what lets
+    the end-to-end and load tests drive the whole pipeline.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    packet_id: UUID
+    idempotency_key: str
+    #: Where this device handed the packet off.
+    submitted_to: str
+    #: Status reported back by the mesh node that accepted it.
+    status: PacketStatus
+    hop_count: int
+
+
 class RelayResponse(BaseModel):
     """What a mesh relay node reports after forwarding a packet onward."""
 

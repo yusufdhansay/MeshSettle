@@ -1,5 +1,6 @@
 # Secrets and keys — never commit
 .env
+.env.infra
 *.pem
 *.key
 keys/

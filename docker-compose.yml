@@ -1,0 +1,210 @@
+# MeshSettle local orchestration.
+#
+# Brings up the three infrastructure dependencies and all four services, so the
+# full journey (sender -> relay -> bridge -> queue -> settlement) runs across
+# real process and network boundaries rather than as in-process function calls.
+#
+# Prerequisites: `.env` and `.env.infra`, both gitignored and never committed.
+# Generate them together so credentials cannot drift:
+#
+#     python scripts/bootstrap_env.py
+#     docker compose up --build -d
+#     docker compose ps
+#
+# Host ports are offset (15432/16379/15672/18001-18004) so this stack can run
+# alongside any Postgres, Redis or RabbitMQ already listening locally.
+#
+# Note on credentials: nothing here uses `${VAR}` interpolation. Compose
+# resolves `${VAR}` from the *invoking shell* first and only then from `.env`,
+# so a stale `export POSTGRES_PASSWORD=...` in your terminal would silently
+# initialize Postgres with one password while the services authenticate with
+# another. Reading values only from `env_file` removes that failure mode.
+# (This is not hypothetical; it is exactly what happened while building this.)
+#
+# The infrastructure containers read `.env.infra`, which holds only the
+# credentials they need. They never receive the signing or key-wrapping PEMs,
+# because anything in a container's environment is visible to `docker inspect`.
+
+name: meshsettle
+
+# Settings every service shares. Hostnames point at compose service names, and
+# deliberately override whatever `.env` says for local development, so the same
+# `.env` works both on the host and in the stack.
+x-service-env: &service-env
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: "5432"
+  REDIS_URL: redis://redis:6379/0
+  RABBITMQ_HOST: rabbitmq
+  RABBITMQ_PORT: "5672"
+  MESH_RELAY_URL: http://mesh_relay:8002
+  BRIDGE_URL: http://bridge:8003
+
+x-service-base: &service-base
+  restart: unless-stopped
+  env_file:
+    - .env
+  networks:
+    - meshsettle
+
+services:
+  # --- Infrastructure --------------------------------------------------------
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    # Infra credentials only. The POSTGRES_USER/PASSWORD/DB names this image
+    # expects are already the names used in .env.infra, so no mapping is needed.
+    env_file:
+      - .env.infra
+    ports:
+      - "15432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      # $$ escapes so the variable is expanded inside the container, not by compose.
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks:
+      - meshsettle
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # Persist to disk so a restart does not wipe the dedupe markers. Losing
+    # them is survivable (the Postgres unique constraint still holds) but it
+    # would push duplicate rejection from the cheap path to the database.
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "16379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      - meshsettle
+
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    restart: unless-stopped
+    # An explicit hostname keeps the Erlang node name stable across restarts,
+    # so the persisted data directory stays valid.
+    hostname: meshsettle-rabbit
+    env_file:
+      - .env.infra
+    ports:
+      - "15672:5672"
+      - "15673:15672"  # management UI
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 30s
+    networks:
+      - meshsettle
+
+  # --- Schema ----------------------------------------------------------------
+
+  # Runs once and exits. Uses the settlement image so the migration applied is
+  # always the one that ships with the running code.
+  migrate:
+    build:
+      context: .
+      dockerfile: services/settlement/Dockerfile
+    image: meshsettle/settlement:local
+    restart: "no"
+    env_file:
+      - .env
+    environment:
+      <<: *service-env
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - meshsettle
+
+  # --- Services --------------------------------------------------------------
+
+  sender:
+    <<: *service-base
+    build:
+      context: .
+      dockerfile: services/sender/Dockerfile
+    image: meshsettle/sender:local
+    environment:
+      <<: *service-env
+    ports:
+      - "18001:8001"
+    depends_on:
+      mesh_relay:
+        condition: service_started
+
+  mesh_relay:
+    <<: *service-base
+    build:
+      context: .
+      dockerfile: services/mesh_relay/Dockerfile
+    image: meshsettle/mesh_relay:local
+    environment:
+      <<: *service-env
+      MESH_NODE_ID: relay-1
+      # Two hops before a node with connectivity bridges the packet. The relay
+      # forwards to itself for the first hop, which is how a single container
+      # stands in for a multi-device mesh.
+      MESH_HOP_COUNT: "2"
+    ports:
+      - "18002:8002"
+    depends_on:
+      bridge:
+        condition: service_started
+
+  bridge:
+    <<: *service-base
+    build:
+      context: .
+      dockerfile: services/bridge/Dockerfile
+    image: meshsettle/bridge:local
+    environment:
+      <<: *service-env
+    ports:
+      - "18003:8003"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  settlement:
+    <<: *service-base
+    build:
+      context: .
+      dockerfile: services/settlement/Dockerfile
+    image: meshsettle/settlement:local
+    environment:
+      <<: *service-env
+    ports:
+      - "18004:8004"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+networks:
+  meshsettle:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  rabbitmq_data:

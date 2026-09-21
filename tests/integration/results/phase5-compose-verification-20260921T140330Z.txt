@@ -1,0 +1,37 @@
+Docker: Docker version 29.7.2, build a7dcaa6
+Compose: 5.4.0
+
+MeshSettle compose verification
+UTC: 2026-09-21T14:03:33Z
+==============================================================
+
+[0] service health
+  PASS  sender healthy
+  PASS  mesh_relay healthy
+  PASS  bridge healthy
+  PASS  settlement healthy
+  PASS  settlement is consuming from the queue
+  baseline settlement rows: 2
+
+[1] a single payment travels the full pipeline
+  idempotency key: settle:2f55753fdc082c82c8455da57a636102cbc9f34432e999fccbbb1d9dadc70db6
+  PASS  settled with the exact amount that was sealed
+  PASS  recorded 2 mesh hops
+
+[2] 25 concurrent copies of one packet settle exactly once
+  PASS  exactly 1 settlement row for 25 concurrent copies
+
+[3] 10 corrupted packets are rejected by relay and bridge
+  PASS  relay rejected all 10 corrupted packets with 400
+  PASS  bridge rejected a corrupted packet with INVALID_SIGNATURE
+
+[4] settlement rejects corrupted packets published straight to the queue
+  PASS  settlement independently rejected all 10 corrupted packets
+  PASS  no corrupted packet settled
+  PASS  rejections persisted to rejected_packets (20 rows)
+
+==============================================================
+final settlement rows : 4
+final metrics         : {"settled":2,"rejected":34,"duplicates":24,"invalid_signature":10,"malformed":0,"decryption_failed":0,"internal_errors":0,"queue_depth":0}
+
+ALL CHECKS PASSED

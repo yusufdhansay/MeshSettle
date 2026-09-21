@@ -1,0 +1,34 @@
+# Never ship secrets or local state into an image
+.env
+.env.infra
+*.pem
+*.key
+keys/
+secrets/
+
+# Local virtualenv and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# Local data and results
+pgdata/
+*.db
+tests/load/results/
+tests/concurrency/results/
+
+# VCS and editor
+.git/
+.gitignore
+.DS_Store
+
+# Docs are not needed at runtime
+*.md
+!README.md
+
+# Node modules for the demo UI
+node_modules/

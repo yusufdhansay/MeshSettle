@@ -207,3 +207,128 @@ def test_openapi_documents_the_error_shape(client: TestClient) -> None:
     assert "422" in responses
     assert "429" in responses
     assert json.dumps(schema).count("ErrorResponse") > 0
+
+
+# --- Handing a packet to the mesh -------------------------------------------
+
+
+def _submit_client(keys, handler) -> TestClient:
+    """A sender whose mesh handoff goes to a stub instead of a real relay."""
+    import httpx
+
+    from services.sender.app import get_http_client, get_mesh_entrypoint
+
+    app = create_app()
+    app.dependency_overrides[get_signing_key] = lambda: keys.signing_private
+    app.dependency_overrides[get_recipient_public_key] = lambda: keys.rsa_public
+    app.dependency_overrides[get_http_client] = lambda: httpx.AsyncClient(
+        transport=httpx.MockTransport(handler)
+    )
+    app.dependency_overrides[get_mesh_entrypoint] = lambda: "http://relay-1/relay"
+    return TestClient(app)
+
+
+class RelayStub:
+    """Captures what the sender handed to the mesh."""
+
+    def __init__(self, status_code: int = 202, body: dict | None = None) -> None:
+        self.status_code = status_code
+        self.body = body if body is not None else {"status": "relayed", "hop_count": 1}
+        self.requests: list[bytes] = []
+
+    def __call__(self, request):  # noqa: ANN001 - httpx passes its own Request type
+        import httpx
+
+        self.requests.append(request.content)
+        return httpx.Response(self.status_code, json=self.body)
+
+
+def test_submit_creates_a_packet_and_hands_it_to_the_mesh(keys) -> None:
+    relay = RelayStub()
+    with _submit_client(keys, relay) as client:
+        response = client.post("/packets/submit", json=_valid_body())
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["submitted_to"] == "http://relay-1/relay"
+    assert body["status"] == "relayed"
+    assert body["hop_count"] == 1
+
+    # Exactly one packet was handed over, and it verifies.
+    assert len(relay.requests) == 1
+    handed = PaymentPacket.model_validate_json(relay.requests[0])
+    handed.verify(keys.signing_public)
+    assert str(handed.packet_id) == body["packet_id"]
+    assert handed.idempotency_key == body["idempotency_key"]
+    assert handed.hop_count == 0, "the sender records no hops of its own"
+
+
+def test_submitted_packet_carries_the_requested_instruction(keys) -> None:
+    relay = RelayStub()
+    with _submit_client(keys, relay) as client:
+        client.post("/packets/submit", json=_valid_body(amount_minor=333_33))
+
+    handed = PaymentPacket.model_validate_json(relay.requests[0])
+    instruction = handed.open_instruction(keys.rsa_private)
+    assert instruction.amount_minor == 333_33
+
+
+def test_submit_reports_bridged_when_the_mesh_says_so(keys) -> None:
+    relay = RelayStub(body={"status": "bridged", "hop_count": 2})
+    with _submit_client(keys, relay) as client:
+        body = client.post("/packets/submit", json=_valid_body()).json()
+
+    assert body["status"] == "bridged"
+    assert body["hop_count"] == 2
+
+
+def test_submit_reports_bad_gateway_when_no_mesh_node_accepts(keys) -> None:
+    """If the handoff fails the caller must not be told the payment is on its way."""
+    relay = RelayStub(status_code=503, body={"code": "INTERNAL_ERROR", "detail": "nope"})
+    with _submit_client(keys, relay) as client:
+        response = client.post("/packets/submit", json=_valid_body())
+
+    assert response.status_code == 502
+    assert response.json()["code"] == ErrorCode.INTERNAL_ERROR.value
+
+
+def test_submit_reports_bad_gateway_when_the_mesh_is_unreachable(keys) -> None:
+    import httpx
+
+    def refuse(request):  # noqa: ANN001, ANN202
+        raise httpx.ConnectError("no neighbour in range", request=request)
+
+    with _submit_client(keys, refuse) as client:
+        response = client.post("/packets/submit", json=_valid_body())
+
+    assert response.status_code == 502
+    assert response.json()["code"] == ErrorCode.INTERNAL_ERROR.value
+
+
+def test_submit_validates_input_before_any_handoff(keys) -> None:
+    relay = RelayStub()
+    with _submit_client(keys, relay) as client:
+        response = client.post("/packets/submit", json=_valid_body(amount_minor=-1))
+
+    assert response.status_code == 422
+    assert response.json()["code"] == ErrorCode.MALFORMED_PAYLOAD.value
+    assert relay.requests == [], "an invalid request must not reach the mesh"
+
+
+def test_submit_does_not_leak_the_instruction_in_its_response(keys) -> None:
+    relay = RelayStub()
+    with _submit_client(keys, relay) as client:
+        raw = client.post("/packets/submit", json=_valid_body(payee_id="device-carol")).text
+
+    assert "device-carol" not in raw
+    assert "1250" not in raw
+
+
+def test_each_submit_creates_a_distinct_packet(keys) -> None:
+    relay = RelayStub()
+    with _submit_client(keys, relay) as client:
+        first = client.post("/packets/submit", json=_valid_body()).json()
+        second = client.post("/packets/submit", json=_valid_body()).json()
+
+    assert first["packet_id"] != second["packet_id"]
+    assert first["idempotency_key"] != second["idempotency_key"]
