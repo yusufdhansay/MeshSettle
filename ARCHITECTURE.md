@@ -160,6 +160,11 @@ is the correctness property; reordering any two of these breaks a guarantee.
 2. **Verify the Ed25519 signature** against the sender's registered public
    key, over the canonical signing bytes. Fail → reject
    (`INVALID_SIGNATURE`). Nothing below this line runs on unverified data.
+2a. **Check the AAD against the header**: `envelope.aad` must equal
+   `canonical_json({packet_id, sender_id})` for this packet's own header.
+   Mismatch → reject (`MALFORMED_PAYLOAD`). See "Why the AAD must be checked
+   explicitly" below; without this step the AAD binding is only incidentally
+   effective.
 3. **Atomic dedupe claim** in Redis: `SET idempotency_key <claim> NX EX
    <ttl>`. If the key already exists, the packet is a duplicate → reject
    (`DUPLICATE_PACKET`) and return before touching Postgres.
@@ -169,6 +174,30 @@ is the correctness property; reordering any two of these breaks a guarantee.
    envelope `packet_id` and `amount_minor > 0`. Mismatch → reject
    (`MALFORMED_PAYLOAD`).
 6. **Write the settlement** to Postgres inside a single transaction.
+
+### Why the AAD must be checked explicitly
+
+AES-GCM authenticates the AAD, so a ciphertext cannot be opened with the
+wrong AAD. It is tempting to conclude that the AAD binding alone prevents an
+attacker from lifting a sealed envelope onto a different header. It does not,
+because the attacker chooses what AAD to present: if they copy the original
+envelope *and* its original AAD onto a fresh header that they sign themselves,
+the GCM tag check passes, since the AAD they supplied really is the one the
+ciphertext was sealed with.
+
+Such a packet is still ultimately refused, because the decrypted
+`PaymentInstruction.packet_id` will not match the new header's `packet_id`
+(step 5). But relying on that is fragile: the replay would have already
+consumed an idempotency key, and the rejection would come from a check whose
+stated purpose is something else entirely.
+
+Step 2a closes this properly by comparing the presented AAD against the one
+this header implies. The binding then does the job it exists for, and the
+replay is rejected before it touches the dedupe layer.
+
+This was found by a test, not by inspection: the replay test initially
+asserted `DECRYPTION_FAILED` and the code returned `MALFORMED_PAYLOAD` from
+the step 5 cross-check instead, which is what exposed the gap.
 
 ### Why Redis before Postgres
 

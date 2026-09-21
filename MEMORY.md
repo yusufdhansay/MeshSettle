@@ -4,7 +4,7 @@ This file is the persistent context across sessions. Read it first,
 every time, before doing anything else.
 
 ## Current Phase
-Phase 4: Settlement service (the core of the project) — next
+Phase 5: Dockerize and compose — next
 
 ## Completed Phases
 - Phase 0 — Scaffolding: six root docs, folder tree per ARCHITECTURE.md,
@@ -26,11 +26,97 @@ Phase 4: Settlement service (the core of the project) — next
   `services/bridge/publisher.py`, `services/bridge/app.py`, plus the
   `tests/mesh_harness.py` routing transport. 182 tests passing, including
   6 against a real RabbitMQ broker in Docker.
-  Commit `<phase3>` — 2026-09-21
+  Commit `670545f` — 2026-09-21
+- Phase 4 — Settlement service with exactly-once guarantee:
+  `services/settlement/{db,dedupe,processor,consumer,app}.py`, Alembic
+  setup (`alembic.ini`, `migrations/env.py`, one migration), and the
+  correctness suites in `tests/concurrency/`. 255 tests passing.
+  Found and fixed a real gap in the replay defence while writing the
+  tamper test (see the AAD assumption below).
+  Commit `<phase4>` — 2026-09-21
 
 ## In Progress
-Nothing in flight. Phase 3 closed, Phase 4 (settlement service) not yet
+Nothing in flight. Phase 4 closed, Phase 5 (Docker + compose) not yet
 started.
+
+## Settlement API reference (for later phases)
+`services/settlement/db.py`:
+- `Base`, `Settlement`, `RejectedPacket` ORM models
+- `settlements` columns: id, idempotency_key, packet_id, sender_id,
+  payer_id, payee_id, amount_minor, currency, packet_created_at,
+  settled_at, hop_count. Constraints:
+  `uq_settlements_idempotency_key` (the durable exactly-once guarantee),
+  `uq_settlements_packet_id`, `ck_settlements_amount_positive`,
+  `ck_settlements_hop_count_non_negative`.
+- `rejected_packets` columns: id, idempotency_key (nullable), packet_id
+  (nullable), reason, detail, rejected_at
+- `create_engine(dsn=None)`, `create_session_factory(engine)`,
+  `create_all(engine)`, `drop_all(engine)` (tests only)
+- `settlement_exists`, `get_settlement`, `count_settlements(session,
+  key=None)`, `count_rejections(session, reason=None)`,
+  `record_rejection(session, reason=, detail=, idempotency_key=,
+  packet_id=)`
+
+`services/settlement/dedupe.py`:
+- `ClaimOutcome` StrEnum: `CLAIMED`, `IN_FLIGHT`, `ALREADY_SETTLED`
+- `DedupeStore(client, claim_ttl_seconds=None, settled_ttl_seconds=None)`
+  with `.claim(key)`, `.mark_settled(key)`, `.release_claim(key)`,
+  `.state(key)`, `.ping()`
+- `create_redis_client(url=None)`, `CLAIMED_MARKER`, `SETTLED_MARKER`
+- Two marker lifetimes: `claimed` on a short TTL
+  (`DEDUPE_CLAIM_TTL_SECONDS`, default 60) so a crashed consumer's claim
+  expires and the broker's redelivery can win it; `settled` on a long TTL
+  (`DEDUPE_TTL_SECONDS`, default 86400) so redelivered duplicates are
+  rejected without touching Postgres.
+
+`services/settlement/processor.py`:
+- `SettlementProcessor(session_factory=, dedupe=, sender_public_key=,
+  settlement_private_key=, metrics=None)` with `.process(raw_body)
+  -> SettlementOutcome` and `.metrics`
+- `SettlementOutcome(status, detail, code, idempotency_key, packet_id,
+  settlement_id, retryable)` plus `.settled`
+- `SettlementMetrics` with `.record(outcome)`, `.snapshot()`, `.rejected`
+  and counters settled/duplicates/invalid_signature/malformed/
+  decryption_failed/internal_errors
+- Pipeline order: parse → verify signature → **AAD/header check** →
+  Redis `SET NX` claim → decrypt → inner/outer packet_id cross-check →
+  Postgres transaction → `mark_settled`. `IntegrityError` on insert is
+  translated to `DUPLICATE_PACKET`.
+
+`services/settlement/consumer.py`:
+- `SettlementConsumer(processor, url=None, queue=None,
+  prefetch_count=32, on_outcome=None)` with `.start()`, `.stop()`,
+  `.wait_closed()`, `.queue_depth()`, `.queue_name`
+- Acks settled and permanently-rejected messages; nacks with
+  `requeue=True` only for retryable outcomes or an unexpected crash.
+  Ack happens only after the Postgres commit.
+
+`services/settlement/app.py`:
+- `create_app()`, `app`; dependencies `get_session_factory`,
+  `get_dedupe_store`, `get_metrics`, `get_consumer` (override in tests)
+- Models `SettlementView`, `MetricsView`, `HealthView`
+- Routes (all read-only): `GET /healthz`, `GET /metrics`,
+  `GET /settlements/{idempotency_key}`, `GET /settlements?limit=`
+  (clamped to 1..100). There is deliberately no HTTP write path.
+
+## Migrations
+`alembic.ini` sets `script_location = migrations` and deliberately does
+NOT contain a database URL; `migrations/env.py` injects
+`settings.postgres_sync_dsn` at runtime so credentials are never
+committed. Migrations use the sync psycopg driver; the app uses asyncpg.
+Current head: `9fe74eee6261` (create settlements and rejected_packets).
+Verified `upgrade head` → `downgrade base` → `upgrade head` against real
+Postgres 16.15. Run with the POSTGRES_* env vars pointing at your target.
+
+## Test infrastructure for phases 4+
+Containers used (ports chosen to avoid clashing with anything local):
+- `docker run --rm --name meshsettle-pg-test -p 5433:5432 -e POSTGRES_USER=meshsettle -e POSTGRES_PASSWORD=testonly-localdev -e POSTGRES_DB=meshsettle postgres:16-alpine`
+- `docker run --rm --name meshsettle-redis-test -p 6380:6379 redis:7-alpine`
+- `docker run --rm --name meshsettle-rabbit-test --hostname meshrabbit -p 5673:5672 rabbitmq:3.13`
+Env overrides honoured by the tests: `MESHSETTLE_TEST_PG_DSN`,
+`MESHSETTLE_TEST_REDIS_URL`, `MESHSETTLE_TEST_AMQP_URL`. Every
+infrastructure-backed test skips rather than fails when its dependency is
+unreachable, so `pytest` works with no Docker at all.
 
 ## Mesh/bridge API reference (for later phases)
 `services/mesh_relay/app.py`:
@@ -167,6 +253,33 @@ fixtures (`KeyBundle` with `.signing_private`, `.signing_public`,
   `/usr/local/opt/python@3.12/bin/python3.12` (3.12.9) for the venv
   instead, so we stay on the specified 3.12 line and still satisfy the
   RULES.md requirement to format with black.
+- **The AAD must be compared against the header explicitly (found by a
+  test, and it was a real gap)**: I assumed AES-GCM's AAD authentication
+  alone stopped an attacker lifting a sealed envelope onto a different
+  header. It does not, because the attacker chooses which AAD to present:
+  copy the original envelope *and* its original AAD onto a fresh header you
+  sign yourself, and the GCM tag check passes. The replay test initially
+  asserted `DECRYPTION_FAILED`, the code returned `MALFORMED_PAYLOAD` from
+  the step 5 inner/outer packet_id cross-check, and that mismatch exposed
+  it. The cross-check did catch the attack, but only incidentally and only
+  *after* the replay had consumed an idempotency key. Added step 2a to the
+  processor (and to ARCHITECTURE.md): reject when `envelope.aad !=
+  expected_aad()`, before the dedupe claim. Lesson worth keeping: a
+  cryptographic primitive only binds what you actually check.
+- **Duplicates are logged but not persisted as rejections**: every other
+  rejection reason gets a `rejected_packets` row, but duplicates only get a
+  log line and a counter. Persisting them would mean a duplicate opens a
+  Postgres transaction, which is exactly the thing the Redis layer exists to
+  avoid, and would contradict the PRD's claim that duplicates never reach
+  the database. `test_duplicate_is_rejected_before_postgres_is_touched`
+  enforces this by swapping in a session factory that raises if used.
+- **A rejected packet releases its claim; a settled one keeps it**: a
+  permanently invalid packet will never settle under its key, so holding
+  the key achieves nothing and `release_claim` keeps Redis clean. A settled
+  packet's key is promoted to the long-lived `settled` marker.
+- **`tests/concurrency/results/` added** to hold raw correctness output,
+  mirroring `tests/load/results/`, because RULES.md requires every number
+  in the repo to be traceable to an actual run.
 - **Relay and bridge verify signatures, not just settlement**:
   ARCHITECTURE.md says "nothing is trusted or re-derived along the way
   except at the final settlement service", while RULES.md says "every
@@ -280,6 +393,29 @@ fixtures (`KeyBundle` with `.signing_private`, `.signing_public`,
   `RATE_LIMIT_PER_MINUTE=60`, exactly the first 60 POST `/packets`
   requests returned 201 and request 61 onward returned 429
   (`test_packet_endpoint_is_rate_limited` asserts `first_limited == 60`).
-- Concurrency test (Phase 4): not yet run
-- Tamper test at settlement layer (Phase 4): not yet run
+- **Concurrency test (Phase 4), the headline number**: 50 duplicate packets
+  fired simultaneously at the real processor, **1 settled**, 49 rejected as
+  `DUPLICATE_PACKET`. Asserted in Postgres, not just in return values.
+  Test: `test_fifty_simultaneous_duplicates_settle_exactly_once`.
+- Exactly-once also verified at 2, 10, 100 and 250 concurrent duplicates:
+  exactly 1 settlement row in every case
+  (`test_exactly_once_holds_at_several_concurrency_levels`).
+- Raw claim primitive: 100 concurrent `SET NX` claims on one key produced
+  exactly 1 `CLAIMED` and 99 `IN_FLIGHT` (`test_only_one_claim_wins`).
+- Redis-amnesia fallback: after settling a packet and flushing Redis
+  entirely, a replay was still refused, caught by the Postgres unique
+  constraint, leaving 1 settlement row. Also holds with 20 concurrent
+  replays each preceded by a Redis flush.
+- **Tamper test (Phase 4)**: 50 corrupted packets fired (8 distinct
+  corruption types cycled: signature bit flip, sender_id swap, packet_id
+  swap, created_at rewrite, ciphertext / encrypted_key / nonce / aad bit
+  flips). **0 settled, 50 recorded as rejected** in the `rejected_packets`
+  table. Test: `test_fifty_corrupted_packets_all_rejected_and_none_settle`.
+- Full suite at end of Phase 4: **255 tests, 255 passed, 0 failed**,
+  wall time 34.53s. Command `.venv/bin/python -m pytest -q`.
+- Phase 4 concurrency/tamper raw output saved to
+  `tests/concurrency/results/phase4-correctness-20260921T121301Z.txt`
+  (49 tests, 49 passed, 20.96s), stamped with the real component versions
+  it ran against: Python 3.12.9, PostgreSQL 16.15, Redis 7.4.11,
+  RabbitMQ 3.13.7.
 - Load test (Phase 6): not yet run

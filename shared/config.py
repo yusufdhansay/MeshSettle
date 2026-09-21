@@ -34,7 +34,17 @@ class Settings(BaseSettings):
 
     # --- Redis ---
     redis_url: str = "redis://localhost:6379/0"
+    #: How long a "this packet is already settled" marker is remembered. Sets
+    #: the window inside which a redelivered duplicate is rejected by Redis
+    #: without touching Postgres.
     dedupe_ttl_seconds: int = 86_400
+    #: How long an in-flight claim is held before it is considered abandoned.
+    #: Deliberately short: if a consumer dies between claiming and committing,
+    #: the broker redelivers the message and the retry must be able to win the
+    #: claim. Too long and a crash stalls that packet; too short and a slow
+    #: settlement could be claimed twice (the Postgres unique constraint still
+    #: prevents a double write in that case).
+    dedupe_claim_ttl_seconds: int = Field(default=60, ge=1)
 
     # --- RabbitMQ ---
     rabbitmq_user: str = "meshsettle"
