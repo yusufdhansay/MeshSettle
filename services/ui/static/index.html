@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MeshSettle</title>
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<main class="page">
+
+  <header class="header">
+    <h1>MeshSettle</h1>
+    <p class="muted">
+      An offline payment packet, signed and sealed on one device, carried
+      hop by hop, and settled exactly once. Simulation only; moves no real money.
+    </p>
+  </header>
+
+  <!-- Send a payment -->
+  <section class="card">
+    <h2>Send a payment</h2>
+    <form id="payment-form" class="form" autocomplete="off">
+      <div class="field">
+        <label for="payer">Payer</label>
+        <input id="payer" name="payer" value="device-alice" required
+               pattern="[A-Za-z0-9_.:\-]{1,64}">
+      </div>
+      <div class="field">
+        <label for="payee">Payee</label>
+        <input id="payee" name="payee" value="device-bob" required
+               pattern="[A-Za-z0-9_.:\-]{1,64}">
+      </div>
+      <div class="field">
+        <label for="amount">Amount <span class="muted">(paise)</span></label>
+        <input id="amount" name="amount" type="number" value="45678" min="1"
+               step="1" required>
+      </div>
+      <div class="actions">
+        <button type="submit" class="btn btn-primary" id="send-btn">
+          Send payment
+        </button>
+        <button type="button" class="btn btn-outline" id="replay-btn" disabled>
+          Send the same packet again
+        </button>
+      </div>
+    </form>
+    <p class="hint muted" id="replay-hint">
+      The second button re-sends the identical packet. It should be refused as a
+      duplicate, and the settled amount must not change.
+    </p>
+  </section>
+
+  <!-- Packet journey -->
+  <section class="card" id="journey-card" hidden>
+    <h2>Packet journey</h2>
+
+    <ol class="stepper" id="stepper">
+      <li class="step" data-step="created"><span class="dot"></span>Created</li>
+      <li class="step" data-step="relayed"><span class="dot"></span>Relayed</li>
+      <li class="step" data-step="bridged"><span class="dot"></span>Bridged</li>
+      <li class="step" data-step="final"><span class="dot"></span><span
+        id="final-label">Settled</span></li>
+    </ol>
+
+    <p class="status-line">
+      <span class="dot" id="status-dot"></span>
+      <span id="status-label">Waiting</span>
+      <span class="muted" id="status-detail"></span>
+    </p>
+
+    <dl class="facts">
+      <dt>Packet ID</dt>
+      <dd class="mono" id="fact-packet-id">&mdash;</dd>
+
+      <dt>Idempotency key</dt>
+      <dd class="mono" id="fact-idempotency-key">&mdash;</dd>
+
+      <dt>Mesh hops recorded</dt>
+      <dd id="fact-hops">&mdash;</dd>
+
+      <dt>Settled amount</dt>
+      <dd id="fact-amount">&mdash;</dd>
+    </dl>
+  </section>
+
+  <!-- Attempts on this packet -->
+  <section class="card" id="attempts-card" hidden>
+    <h2>Submissions of this packet</h2>
+    <table class="table">
+      <thead>
+        <tr><th>#</th><th>Outcome</th><th>Detail</th></tr>
+      </thead>
+      <tbody id="attempts-body"></tbody>
+    </table>
+  </section>
+
+  <!-- Settlement counters -->
+  <section class="card">
+    <h2>Settlement counters</h2>
+    <p class="muted hint">
+      Read from the settlement service. Counters reset when it restarts.
+    </p>
+    <dl class="facts facts-compact">
+      <dt>Settled</dt><dd class="mono" id="metric-settled">&mdash;</dd>
+      <dt>Duplicates refused</dt><dd class="mono" id="metric-duplicates">&mdash;</dd>
+      <dt>Bad signatures refused</dt><dd class="mono" id="metric-invalid">&mdash;</dd>
+      <dt>Queue depth</dt><dd class="mono" id="metric-queue">&mdash;</dd>
+    </dl>
+  </section>
+
+  <footer class="footer muted">
+    MeshSettle is an original simulation. Not affiliated with UPI, NPCI, or any
+    real payment network.
+  </footer>
+
+</main>
+<script src="/static/app.js"></script>
+</body>
+</html>

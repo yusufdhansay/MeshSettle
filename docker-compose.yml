@@ -36,8 +36,10 @@ x-service-env: &service-env
   REDIS_URL: redis://redis:6379/0
   RABBITMQ_HOST: rabbitmq
   RABBITMQ_PORT: "5672"
+  SENDER_URL: http://sender:8001
   MESH_RELAY_URL: http://mesh_relay:8002
   BRIDGE_URL: http://bridge:8003
+  SETTLEMENT_URL: http://settlement:8004
 
 x-service-base: &service-base
   restart: unless-stopped
@@ -179,6 +181,24 @@ services:
     depends_on:
       rabbitmq:
         condition: service_healthy
+
+  # Demo viewer. Serves the static page and proxies a fixed set of four calls,
+  # so the page is same-origin and neither the sender nor settlement needs CORS.
+  ui:
+    <<: *service-base
+    build:
+      context: .
+      dockerfile: services/ui/Dockerfile
+    image: meshsettle/ui:local
+    environment:
+      <<: *service-env
+    ports:
+      - "18000:8000"
+    depends_on:
+      sender:
+        condition: service_started
+      settlement:
+        condition: service_started
 
   settlement:
     <<: *service-base

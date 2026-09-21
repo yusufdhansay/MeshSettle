@@ -42,7 +42,13 @@ packages = [
     "services.mesh_relay",
     "services.bridge",
     "services.settlement",
+    "services.ui",
 ]
+
+[tool.setuptools.package-data]
+# The demo UI's static assets are part of the package, not just files the
+# Dockerfile happens to copy, so an installed wheel serves the page correctly.
+"services.ui" = ["static/*"]
 
 [tool.black]
 line-length = 100

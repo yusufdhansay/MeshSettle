@@ -1,0 +1,52 @@
+MeshSettle Phase 9 demo UI verification
+UTC: 2026-09-21T15:44:36Z
+
+=== page and assets served ===
+/                      http=200 bytes=3923
+/static/styles.css     http=200 bytes=6904
+/static/app.js         http=200 bytes=10095
+/healthz               http=200 bytes=30
+
+=== mint a packet through the UI proxy ===
+http=201
+packet_id      : f6c71f84-f073-459f-87c8-5452c2cb60eb
+idempotency_key: settle:5bd7a1750dedaabfcf50634026ab8dd44341efe9f1b687a7941be6c15b6b95f1
+
+=== first submission ===
+{"status":"relayed","node_id":"relay-1","hop_count":1,"forwarded_to":"http://mesh_relay:8002/relay","packet_id":"f6c71f84-f073-459f-87c8-5452c2cb60eb"} http=202
+
+=== settlement as the UI reads it ===
+{
+    "id": 6,
+    "idempotency_key": "settle:5bd7a1750dedaabfcf50634026ab8dd44341efe9f1b687a7941be6c15b6b95f1",
+    "packet_id": "f6c71f84-f073-459f-87c8-5452c2cb60eb",
+    "sender_id": "device-1d97c04e",
+    "payer_id": "device-alice",
+    "payee_id": "device-bob",
+    "amount_minor": 45678,
+    "currency": "INR",
+    "packet_created_at": "2026-09-21T15:44:37.045051Z",
+    "settled_at": "2026-09-21T15:44:37.234400Z",
+    "hop_count": 2
+}
+
+=== 3 replays of the identical packet ===
+replay 1 http=202
+replay 2 http=202
+replay 3 http=202
+
+=== settlement after replays (must be identical) ===
+id 6 amount_minor 45678 hop_count 2
+rows in postgres for that key:
+1
+=== counters the UI displays ===
+{
+    "settled": 4,
+    "rejected": 40,
+    "duplicates": 30,
+    "invalid_signature": 10,
+    "malformed": 0,
+    "decryption_failed": 0,
+    "internal_errors": 0,
+    "queue_depth": 0
+}

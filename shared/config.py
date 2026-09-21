@@ -68,8 +68,10 @@ class Settings(BaseSettings):
     mesh_hop_limit: int = Field(default=16, ge=1)
     #: Identity of this relay node, recorded in each hop record.
     mesh_node_id: str = "relay-1"
+    sender_url: str = "http://localhost:8001"
     mesh_relay_url: str = "http://localhost:8002"
     bridge_url: str = "http://localhost:8003"
+    settlement_url: str = "http://localhost:8004"
     #: Timeout for a single forwarding call between mesh nodes, in seconds.
     mesh_forward_timeout_seconds: float = Field(default=5.0, gt=0)
 

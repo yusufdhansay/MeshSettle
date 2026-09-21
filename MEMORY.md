@@ -4,7 +4,7 @@ This file is the persistent context across sessions. Read it first,
 every time, before doing anything else.
 
 ## Current Phase
-Phase 9: Minimal demo UI — next
+Phase 10: Final README and number consolidation — next
 
 ## Completed Phases
 - Phase 0 — Scaffolding: six root docs, folder tree per ARCHITECTURE.md,
@@ -64,8 +64,51 @@ Phase 9: Minimal demo UI — next
   re-verified on the upgraded stack.
   Commit `47221ab` — 2026-09-21
 
+- Phase 9 — Demo UI: `services/ui/` (FastAPI app, four-call proxy, static
+  page per DESIGN.md) plus its Dockerfile and a compose service on port
+  18000. 35 tests including DESIGN.md compliance assertions. Verified live:
+  the page and assets serve, a payment completes the full journey through
+  the proxy, and 3 replays of the identical packet leave the settlement row
+  untouched. Suite now 298 passing.
+  Commit `<phase9>` — 2026-09-21
+
 ## In Progress
-Nothing in flight. Phase 8 closed, Phase 9 (demo UI) not yet started.
+Nothing in flight. Phase 9 closed, Phase 10 (final README) not yet started.
+
+## Demo UI
+`services/ui/app.py` serves `services/ui/static/{index.html,styles.css,app.js}`
+and proxies exactly four upstream calls:
+`POST /api/packets` → sender, `POST /api/relay` → mesh_relay,
+`GET /api/settlements/{key}` → settlement, `GET /api/metrics` → settlement.
+Plus `GET /healthz` and `GET /`. Reachable at http://localhost:18000 when the
+compose stack is up. `docs_url`/`redoc_url` are disabled.
+
+Two deliberate design decisions:
+- **Its own service, not static files on the sender.** The sender models a
+  payer's device; giving it a web UI and a settlement read-proxy would blur
+  that. More importantly, same-origin serving avoids CORS entirely — the
+  alternative was adding permissive CORS middleware to two payment-path
+  services for the benefit of a demo page.
+- **The page mints a packet and submits it as two separate steps.** It holds
+  the packet JSON so "send the same packet again" replays the *identical
+  bytes*, which is the only thing that actually exercises deduplication. A
+  button that created a fresh packet each time would just be making two
+  different payments and would prove nothing.
+The proxy is a fixed allowlist that accepts no URL from the client, so it
+cannot be turned into an open proxy into the cluster network;
+`test_proxy_exposes_no_client_controlled_url` asserts the exact route surface.
+Rejections are passed through verbatim, including the error code, because a
+demo that hid a `DUPLICATE_PACKET` response would misrepresent the one
+property the project exists to prove.
+
+`tests/unit/test_ui.py` also encodes DESIGN.md as tests: the exact eight-colour
+palette, no `box-shadow`, no gradients, exactly three font-size tokens with no
+ad-hoc `font-size: Npx`, only weights 400/600, 8px radius, the 8px round status
+dot (and the word "badge" absent), the four stepper stages, monospace on the
+packet id and idempotency key, the system font stack, `prefers-reduced-motion`,
+and the not-affiliated disclaimer. Note the CSS comments describe the rules
+("no gradients"), so `_css()` strips comments before asserting — otherwise the
+checks match the prose instead of the declarations.
 
 ## CI
 `.github/workflows/ci.yml`, on every push and PR, with
@@ -401,6 +444,16 @@ fixtures (`KeyBundle` with `.signing_private`, `.signing_public`,
   `/usr/local/opt/python@3.12/bin/python3.12` (3.12.9) for the venv
   instead, so we stay on the specified 3.12 line and still satisfy the
   RULES.md requirement to format with black.
+- **`services/ui/` added as a fifth service.** ARCHITECTURE.md's tree lists
+  four, but DESIGN.md requires a demo UI and it needs somewhere to live.
+  Putting it on the sender would have meant either CORS on two payment-path
+  services or a device service that also serves HTML. A separate viewer holds
+  no keys and no database credentials, so it is the smallest addition to the
+  trust surface. `services.ui` was added to `pyproject.toml` packages, with
+  `[tool.setuptools.package-data]` so the static assets ship in the wheel
+  rather than relying on the Dockerfile's COPY.
+- **`SENDER_URL` and `SETTLEMENT_URL` added to config** so the UI can reach
+  its upstreams; compose sets them to the service names.
 - **The Phase 0 dependency pins were badly out of date and carried 17
   CVEs.** I pinned versions in Phase 0 from memory; it is now late 2026, so
   those pins were roughly two years stale. `pip-audit` caught it. Upgraded
@@ -759,6 +812,21 @@ fixtures (`KeyBundle` with `.signing_private`, `.signing_public`,
     packet ids settled twice.** This is the check that justifies the HPA:
     five independent pods, each with its own Redis connection and database
     session, racing on the same keys.
+- **Phase 9 demo UI verified live against the running stack**, raw output in
+  `tests/integration/results/phase9-ui-verification-20260921T154436Z.txt`,
+  run 2026-09-21T15:44:36Z:
+  - `/` 200, `/static/styles.css` 200, `/static/app.js` 200, `/healthz` 200
+  - a packet minted through `POST /api/packets` and submitted through
+    `POST /api/relay` settled with `amount_minor` 45678 and `hop_count` 2,
+    readable back through `GET /api/settlements/{key}`
+  - **3 replays of the identical packet** all returned 202 from the mesh, and
+    the settlement stayed `id 6, amount_minor 45678`, with exactly **1** row
+    in Postgres for that key
+  - the counters the page displays read `settled 4, duplicates 30`
+  - `scripts/verify_compose.sh` still passed end to end with the UI in the
+    stack, and all 8 containers were healthy
+  - Suite at end of Phase 9: **298 tests, 298 passed**, 37.16s. Security gate
+    still passes, now also covering the UI service (44 assertions).
 - **Phase 8 CI verified by an actual GitHub Actions run**, not just locally.
   Run `35619189056` on commit after `47221ab`, 2026-09-21T15:28:36Z: **all 8
   jobs green**. Lint 34s, Validate compose 23s, Tests 1m52s, Security 32s,

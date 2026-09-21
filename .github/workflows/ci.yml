@@ -220,7 +220,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        service: [sender, mesh_relay, bridge, settlement]
+        service: [sender, mesh_relay, bridge, settlement, ui]
     steps:
       - uses: actions/checkout@v4
 

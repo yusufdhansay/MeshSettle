@@ -182,7 +182,7 @@ fi
 # --- 6. Rate limiting on public endpoints ------------------------------------
 section 6 "rate limiting on public-facing endpoints"
 
-for service in sender mesh_relay bridge settlement; do
+for service in sender mesh_relay bridge settlement ui; do
   if grep -q "limiter.limit(" "services/$service/app.py" 2>/dev/null; then
     COUNT=$(grep -c "limiter.limit(" "services/$service/app.py")
     pass "$service rate limits $COUNT endpoint(s)"
@@ -193,7 +193,7 @@ done
 
 # The limiter must be created per app, not at module scope, or repeated
 # create_app() calls register duplicate limits and shrink the real budget.
-for service in sender mesh_relay bridge settlement; do
+for service in sender mesh_relay bridge settlement ui; do
   if grep -qE "^limiter\s*=\s*Limiter" "services/$service/app.py" 2>/dev/null; then
     fail "$service creates its Limiter at module scope"
   else
@@ -264,7 +264,7 @@ fi
 # --- 10. Containers do not run as root ---------------------------------------
 section 10 "containers run unprivileged"
 
-for service in sender mesh_relay bridge settlement; do
+for service in sender mesh_relay bridge settlement ui; do
   if grep -q "^USER meshsettle" "services/$service/Dockerfile"; then
     pass "$service Dockerfile drops to a non-root user"
   else
