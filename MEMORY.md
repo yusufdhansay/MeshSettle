@@ -4,7 +4,7 @@ This file is the persistent context across sessions. Read it first,
 every time, before doing anything else.
 
 ## Current Phase
-Phase 10: Final README and number consolidation — next
+All 11 phases (0–10) complete. Nothing in progress.
 
 ## Completed Phases
 - Phase 0 — Scaffolding: six root docs, folder tree per ARCHITECTURE.md,
@@ -70,10 +70,32 @@ Phase 10: Final README and number consolidation — next
   the page and assets serve, a payment completes the full journey through
   the proxy, and 3 replays of the identical packet leave the settlement row
   untouched. Suite now 298 passing.
-  Commit `<phase9>` — 2026-09-21
+  Commit `15f92b7` — 2026-09-21
+
+- Phase 10 — Final README: `README.md` consolidating every measured number
+  with its artifact and the conditions it was measured under, plus an honest
+  Known Limitations section. Every figure was cross-checked against its saved
+  output before publishing, which caught one unsupported number (see the HPA
+  correction above).
+  Commit `<phase10>` — 2026-09-21
 
 ## In Progress
-Nothing in flight. Phase 9 closed, Phase 10 (final README) not yet started.
+Nothing. The build is complete.
+
+## How the README numbers were checked
+Before committing Phase 10 I verified each published figure against its
+artifact rather than against memory:
+- A script parsed every relative Markdown link and confirmed all 13 resolve.
+- The three load-test rows (requests, failures, req/s, p50, p95, p99, max) were
+  parsed out of `phase6-load-20260921T141404Z_stats.csv` and compared field by
+  field to the README table. All matched.
+- Each row of the exactly-once and tamper tables was matched to a `PASSED`
+  line in `phase4-correctness-20260921T121301Z.txt` by test name, and the
+  "8 corruption types" claim to the 8 parametrised cases.
+- The Kubernetes, security, compose and UI claims were grepped out of their
+  transcripts.
+This is what surfaced the stale HPA numbers. Worth repeating for any future
+change to the README: check the artifact, not the recollection.
 
 ## Demo UI
 `services/ui/app.py` serves `services/ui/static/{index.html,styles.css,app.js}`
@@ -803,8 +825,16 @@ fixtures (`KeyBundle` with `.signing_private`, `.signing_public`,
   - the read API answered through the ClusterIP Service with
     `{"status":"ok","redis":true,"database":true,"consuming":true}`, so the
     pods reached Postgres, Redis and the broker
-  - the HPA read **live** metrics rather than `<unknown>`:
-    `cpu: 21%/70%, memory: 56%/80%`, `ScalingActive=True`
+  - the HPA reported live metrics and `ScalingActive=True`. In the retained
+    transcript the check read `memory: 63%/80%` with `cpu: <unknown>/70%` (CPU
+    metrics had not landed that early after rollout), and the final summary
+    line read `cpu: 8%/70%, memory: 63%/80%`.
+    **Correction:** an earlier draft of this file and of the README quoted
+    `cpu: 21%/70%, memory: 56%/80%`. Those values came from an earlier
+    `--keep` run that was deleted in favour of the clean one, so they were not
+    supported by any committed artifact. Caught while cross-checking every
+    README number against its saved output before publishing. Both files now
+    quote the retained transcript.
   - 3 copies of one signed packet published to the in-cluster queue across
     2 replicas → **exactly 1 settlement**, amount 31337 as sealed
   - **scaled to 5 replicas, published 200 messages (10 distinct packets ×
