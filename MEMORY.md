@@ -4,16 +4,54 @@ This file is the persistent context across sessions. Read it first,
 every time, before doing anything else.
 
 ## Current Phase
-Phase 1: Crypto core — next
+Phase 2: Packet model and sender service — next
 
 ## Completed Phases
 - Phase 0 — Scaffolding: six root docs, folder tree per ARCHITECTURE.md,
   `pyproject.toml`, `.env.example`, `.gitignore`, `shared/config.py`,
   Python 3.12.9 venv with all deps installed. Lint + format clean.
-  (commit hash recorded below at commit time) — 2026-09-21
+  Commit `d08f52a` — 2026-09-21
+- Phase 1 — Crypto core: `shared/crypto.py` (Ed25519 sign/verify, RSA-OAEP
+  key wrapping, AES-256-GCM payload encryption, canonical JSON, AAD
+  binding, idempotency key derivation) and `shared/keygen.py`. 53 unit
+  tests in `tests/unit/test_crypto.py`, all passing. Lint + format clean.
+  Commit `<phase1>` — 2026-09-21
 
 ## In Progress
-Nothing in flight. Phase 0 closed, Phase 1 (crypto core) not yet started.
+Nothing in flight. Phase 1 closed, Phase 2 (packet model + sender) not
+yet started.
+
+## Crypto API reference (for later phases)
+`shared/crypto.py` public surface, so later phases don't re-derive it:
+- `generate_signing_keypair() -> (private_pem, public_pem)` (Ed25519)
+- `generate_rsa_keypair(bits=3072) -> (private_pem, public_pem)`
+- `load_{signing,rsa}_{private,public}_key(pem)` — raise
+  `KeyConfigurationError` on empty/garbage/wrong-type
+- Cached env-backed loaders: `sender_signing_private_key()`,
+  `sender_signing_public_key()`, `settlement_rsa_private_key()`,
+  `settlement_rsa_public_key()`, plus `reset_key_cache()` for tests
+- `canonical_json(dict) -> bytes` (sorted keys, no whitespace, UTF-8)
+- `b64u_encode/b64u_decode` (unpadded base64url; decode raises `ValueError`)
+- `build_aad(packet_id=, sender_id=) -> bytes`
+- `build_signing_bytes(packet_id=, sender_id=, created_at=,
+  encrypted_key=, nonce=, ciphertext=, aad=) -> bytes`
+- `derive_idempotency_key(signing_bytes) -> "settle:<sha256hex>"`
+- `encrypt_payload(plaintext, rsa_public, aad) -> EncryptedPayload`
+  (NamedTuple: encrypted_key, nonce, ciphertext, aad)
+- `decrypt_payload(encrypted_key=, nonce=, ciphertext=, aad=,
+  recipient_private_key=) -> bytes`, raises `DecryptionError`
+- `sign_bytes(signing_bytes, ed25519_private) -> bytes` (64 bytes)
+- `verify_signature(signing_bytes, signature, ed25519_public) -> None`,
+  raises `SignatureVerificationError`. Returns None on success by design so
+  a caller cannot misread a falsy return as "verified".
+- Exceptions: `CryptoError` base, `KeyConfigurationError`,
+  `SignatureVerificationError`, `DecryptionError`
+- Constants: `AES_KEY_BITS=256`, `AES_KEY_BYTES=32`, `GCM_NONCE_BYTES=12`,
+  `RSA_KEY_BITS=3072`, `IDEMPOTENCY_KEY_PREFIX="settle:"`
+
+`tests/conftest.py` provides session-scoped `keys` and `other_keys`
+fixtures (`KeyBundle` with `.signing_private`, `.signing_public`,
+`.rsa_private`, `.rsa_public`, and the matching `*_pem` strings).
 
 ## Assumptions
 - **Python version**: RULES.md and ARCHITECTURE.md both specify Python
@@ -58,6 +96,11 @@ Nothing in flight. Phase 0 closed, Phase 1 (crypto core) not yet started.
 (none yet)
 
 ## Real Measured Numbers (fill in only from actual test runs)
-- Concurrency test: not yet run
-- Tamper test: not yet run
-- Load test: not yet run
+- Phase 1 crypto unit tests: 53 tests, 53 passed, 0 failed.
+  Command: `.venv/bin/python -m pytest tests/unit/test_crypto.py -q`
+  Run 2026-09-21, wall time 2.94s. Includes 9 tamper-rejection cases
+  (ciphertext, each header field, each envelope byte field, signature bit
+  flip, signature truncation, empty signature, foreign-signer forgery).
+- Concurrency test (Phase 4): not yet run
+- Tamper test at settlement layer (Phase 4): not yet run
+- Load test (Phase 6): not yet run
