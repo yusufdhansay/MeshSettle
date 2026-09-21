@@ -4,7 +4,7 @@ This file is the persistent context across sessions. Read it first,
 every time, before doing anything else.
 
 ## Current Phase
-Phase 6: Load testing — next
+Phase 7: Kubernetes manifests — next
 
 ## Completed Phases
 - Phase 0 — Scaffolding: six root docs, folder tree per ARCHITECTURE.md,
@@ -40,11 +40,38 @@ Phase 6: Load testing — next
   `POST /packets/submit` endpoint on the sender. Whole stack verified
   running: all four checks in the verification script passed. 263 tests
   passing.
-  Commit `<phase5>` — 2026-09-21
+  Commit `e0cb1fd` — 2026-09-21
+- Phase 6 — Load test with captured baseline numbers:
+  `tests/load/locustfile.py` (two user classes) and
+  `scripts/run_load_test.sh` (raises the rate limit, runs Locust headless,
+  drains the queue, reconciles against Postgres, restores the limit).
+  Ran 50 users for 60s against the compose stack: 10,543 requests, zero
+  failures, 176.57 req/s aggregate, p50 140ms, p95 250ms, and exactly-once
+  held under load. Raw artifacts in `tests/load/results/`.
+  Commit `<phase6>` — 2026-09-21
 
 ## In Progress
-Nothing in flight. Phase 5 closed, Phase 6 (load testing) not yet
+Nothing in flight. Phase 6 closed, Phase 7 (Kubernetes manifests) not yet
 started.
+
+## Load testing
+`tests/load/locustfile.py` has two user classes, weighted 4:1:
+- `PaymentSender` (weight 4) hits `POST /packets/submit`, so each task is a
+  distinct payment going through signing, sealing, two relay hops, the
+  bridge and the queue. This is the "how many payments can enter the
+  system" number.
+- `DuplicateFlooder` (weight 1) mints one packet in `on_start` and then
+  replays that same packet at `POST /relay` for the rest of the run, which
+  puts the exactly-once guarantee under sustained concurrent load.
+A 429 is recorded as a failure on purpose, so a throughput number can never
+be inflated by counting rate-limited requests as successes.
+
+Run it with `./scripts/run_load_test.sh [USERS] [SPAWN_RATE] [DURATION]`
+(defaults 50 / 10 / 60s). The script raises `RATE_LIMIT_PER_MINUTE` to
+`LOAD_RATE_LIMIT` (default 1000000) for the duration, recreates sender,
+mesh_relay **and bridge**, waits for the queue to drain after the run,
+verifies no idempotency key or packet id settled twice, and restores the
+original limit via an EXIT trap.
 
 ## Running the stack (Phase 5 onward)
 ```
@@ -294,6 +321,20 @@ fixtures (`KeyBundle` with `.signing_private`, `.signing_public`,
   `/usr/local/opt/python@3.12/bin/python3.12` (3.12.9) for the venv
   instead, so we stay on the specified 3.12 line and still satisfy the
   RULES.md requirement to format with black.
+- **Internal mesh forwarding shares the relay's public rate-limit bucket**:
+  slowapi keys limits by remote address, and the relay forwards hop 2 to
+  itself, so with `MESH_HOP_COUNT=2` that internal call counts against the
+  relay's own 60/min budget. Under load the relay started 429-ing its own
+  forwarding, which the first hop correctly surfaced as a 502. Found during
+  a 10-second smoke run before the real load test (17 `forward_failed`
+  events, all `HTTPStatusError`). The load runner therefore raises the limit
+  on sender, relay **and** bridge, not just the sender. See Known Issues:
+  the real fix is to exempt or separately bucket peer-to-peer mesh traffic,
+  which is a design change rather than a test-harness concern.
+- **Load-test numbers are recorded with their conditions attached**, because
+  a throughput figure without the rate limit, replica count and host is not
+  a fact about the system. A 429 is counted as a Locust failure so the
+  number cannot be quietly inflated by rate-limited requests.
 - **No `${VAR}` interpolation in docker-compose.yml (this bit me for real)**:
   Compose resolves `${VAR}` from the invoking shell *before* falling back to
   `.env`. An `export POSTGRES_PASSWORD=...` left over from running Alembic
@@ -433,7 +474,21 @@ fixtures (`KeyBundle` with `.signing_private`, `.signing_public`,
   a system whose whole point is settlement correctness.
 
 ## Known Issues
-(none yet)
+- **Peer-to-peer mesh traffic is rate-limited as if it were public traffic.**
+  The relay forwards hop 2 to itself, and slowapi buckets by remote address,
+  so internal forwarding competes with external submissions for the same
+  60/min budget. At production defaults this caps the mesh at roughly 30
+  payments per minute per relay before the relay starts refusing its own
+  forwards (surfacing as 502 at the entry hop). The load test works around it
+  by raising the limit, which is fine for measurement but is not a fix.
+  Proper fix: give peer relays a separate, higher bucket (or exempt them via
+  an authenticated peer identity) so that public abuse protection and
+  internal capacity are tuned independently. Not done yet because it changes
+  the relay's trust model, which is beyond what Phase 6 called for.
+- **Load figures are single-host and single-replica.** Client, all four
+  services, Postgres, Redis and RabbitMQ shared one laptop CPU during the
+  run, so the numbers are a floor for this configuration rather than a
+  capacity estimate. Nothing in the repo claims otherwise.
 
 ## Real Measured Numbers (fill in only from actual test runs)
 - Phase 1 crypto unit tests: 53 tests, 53 passed, 0 failed.
@@ -507,4 +562,52 @@ fixtures (`KeyBundle` with `.signing_private`, `.signing_public`,
     independently rather than trusting upstream nodes.
 - Full suite at end of Phase 5: **263 tests, 263 passed, 0 failed**,
   wall time 38.57s.
-- Load test (Phase 6): not yet run
+- **Phase 6 load test (real run against the compose stack)**. Artifacts:
+  `tests/load/results/phase6-load-20260921T141404Z-report.txt`,
+  `..._stats.csv`, `..._stats_history.csv`, `..._stdout.txt`, `....html`.
+  Run 2026-09-21T14:14:04Z. Locust 2.32.5, Python 3.12.9, Docker 29.7.2,
+  Compose 5.4.0, host Darwin 25.6.0 x86_64.
+
+  Conditions: 50 concurrent users, spawn rate 10/s, 60s run, a single
+  replica of each service via docker compose, all on one laptop (so client,
+  services and infrastructure share the same CPU). `RATE_LIMIT_PER_MINUTE`
+  raised to 1,000,000 for the run; the production default is 60/min.
+
+  Measured, from the saved `_stats.csv`:
+  | endpoint | reqs | fails | req/s | p50 | p95 | p99 | max |
+  |---|---|---|---|---|---|---|---|
+  | `POST /packets/submit` (full pipeline) | 8,357 | 0 | 140.84 | 140ms | 250ms | 400ms | 763ms |
+  | `POST /relay` (duplicate replay) | 2,149 | 0 | 36.22 | 130ms | 230ms | 380ms | 705ms |
+  | aggregated | 10,516 | 0 | 177.23 | 140ms | 240ms | 390ms | 763ms |
+
+  The end-of-run console summary reported 10,543 requests and 176.57 req/s;
+  the CSV was flushed at a slightly different instant, hence the ~27 request
+  difference. Both are in the saved artifacts. Zero failures either way.
+
+  Correctness under load, which is the part that actually matters:
+  - 8,412 new settlement rows, and the in-process `settled` counter also
+    read 8,412, so the API's counters and the database agree exactly
+  - **0 duplicate idempotency keys** and **0 packet ids settled twice**,
+    asserted with `GROUP BY ... HAVING count(*) > 1` queries
+  - 2,153 duplicates rejected during the run
+  - queue depth was 0 immediately after the run, so settlement kept pace
+    with ingestion rather than building a backlog
+  - Locust recorded 8,357 pipeline submissions plus 10 minted packets
+    (8,367) against 8,412 settlement rows. The excess is requests that the
+    server completed but that were still in flight when Locust stopped
+    counting at the run-time limit; with 50 users at a 140ms median, roughly
+    50 requests are in flight at any instant, so an excess of ~45 is the
+    expected order of magnitude rather than a lost-or-duplicated-payment
+    signal. The uniqueness assertions above are what rule out duplication.
+
+  Honest caveats on these numbers: single-replica, single-host, loopback
+  networking, one relay container standing in for a multi-device mesh, and
+  the rate limit lifted. They describe this configuration on this hardware
+  and are not a claim about production capacity.
+- An earlier load run at 14:12:00Z was discarded rather than kept: its
+  baseline counts were taken after an earlier smoke test whose packets were
+  still settling, so submissions could not be reconciled against settlements
+  exactly. Its headline figures were consistent (10,349 requests, 0
+  failures, 173.24 req/s, p50 140ms, p95 280ms). The retained run was done
+  against a freshly wiped database (`docker compose down -v`) so the
+  reconciliation is exact.

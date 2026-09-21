@@ -1,0 +1,33 @@
+[2026-09-21 19:44:08,532] Yusufs-MacBook-Air/INFO/locust.main: Starting Locust 2.32.5
+[2026-09-21 19:44:08,546] Yusufs-MacBook-Air/INFO/locust.main: Run time limit set to 60 seconds
+[2026-09-21 19:44:08,568] Yusufs-MacBook-Air/INFO/locust.runners: Ramping to 50 users at a rate of 10.00 per second
+[2026-09-21 19:44:12,586] Yusufs-MacBook-Air/INFO/locust.runners: All users spawned: {"DuplicateFlooder": 10, "PaymentSender": 40} (50 total users)
+[2026-09-21 19:45:08,185] Yusufs-MacBook-Air/INFO/locust.main: --run-time limit reached, shutting down
+[2026-09-21 19:45:08,420] Yusufs-MacBook-Air/INFO/locust.main: writing html report to file: tests/load/results/phase6-load-20260921T141404Z.html
+[2026-09-21 19:45:08,500] Yusufs-MacBook-Air/INFO/locust.main: Shutting down (exit code 0)
+Type     Name                                                                          # reqs      # fails |    Avg     Min     Max    Med |   req/s  failures/s
+--------|----------------------------------------------------------------------------|-------|-------------|-------|-------|-------|-------|--------|-----------
+POST     POST /packets (mint one to replay)                                                10     0(0.00%) |     21      13      42     16 |    0.17        0.00
+POST     POST /packets/submit (full pipeline)                                            8377     0(0.00%) |    148       9     763    140 |  140.29        0.00
+POST     POST /relay (duplicate replay)                                                  2156     0(0.00%) |    138       7     704    130 |   36.11        0.00
+--------|----------------------------------------------------------------------------|-------|-------------|-------|-------|-------|-------|--------|-----------
+         Aggregated                                                                     10543     0(0.00%) |    146       7     763    140 |  176.57        0.00
+
+Response time percentiles (approximated)
+Type     Name                                                                                  50%    66%    75%    80%    90%    95%    98%    99%  99.9% 99.99%   100% # reqs
+--------|--------------------------------------------------------------------------------|--------|------|------|------|------|------|------|------|------|------|------|------
+POST     POST /packets (mint one to replay)                                                     18     24     25     35     42     42     42     42     42     42     42     10
+POST     POST /packets/submit (full pipeline)                                                  140    160    180    190    220    250    310    440    730    760    760   8377
+POST     POST /relay (duplicate replay)                                                        130    150    160    170    200    230    290    420    610    700    700   2156
+--------|--------------------------------------------------------------------------------|--------|------|------|------|------|------|------|------|------|------|------|------
+         Aggregated                                                                            140    160    170    180    210    250    300    430    730    760    760  10543
+
+MeshSettle load test starting
+  sender : http://127.0.0.1:18001
+  relay  : http://127.0.0.1:18002
+MeshSettle load test finished
+  requests    : 10543
+  failures    : 0
+  median (ms) : 140.0
+  p95 (ms)    : 250.0
+  rps         : 176.57
