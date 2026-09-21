@@ -77,7 +77,7 @@ All 11 phases (0–10) complete. Nothing in progress.
   Known Limitations section. Every figure was cross-checked against its saved
   output before publishing, which caught one unsupported number (see the HPA
   correction above).
-  Commit `<phase10>` — 2026-09-21
+  Commit `8c2341f` — 2026-09-21
 
 ## In Progress
 Nothing. The build is complete.
