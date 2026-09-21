@@ -77,6 +77,10 @@ class MetricsView(BaseModel):
     invalid_signature: int
     malformed: int
     decryption_failed: int
+    #: Refused because the signed `created_at` was outside the freshness window.
+    expired: int
+    #: Refused because the signed `created_at` was too far in the future.
+    not_yet_valid: int
     internal_errors: int
     queue_depth: int | None = None
 

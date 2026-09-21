@@ -1,0 +1,91 @@
+MeshSettle Phase 11 freshness-window run
+UTC timestamp : 2026-09-21T16:41:25Z
+Python        : Python 3.12.9
+Postgres      : postgres (PostgreSQL) 16.15
+Redis         : Redis server v=7.4.11
+RabbitMQ      : 3.13.7
+Command       : .venv/bin/python -m pytest tests/concurrency -v
+==============================================================
+============================= test session starts ==============================
+platform darwin -- Python 3.12.9, pytest-9.1.1, pluggy-1.6.0 -- /Users/yusufamin/MeshSettle/.venv/bin/python
+rootdir: /Users/yusufamin/MeshSettle
+configfile: pyproject.toml
+plugins: asyncio-1.4.0, anyio-4.15.1
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=function, asyncio_default_test_loop_scope=function
+collecting ... collected 73 items
+
+tests/concurrency/test_exactly_once.py::test_fifty_simultaneous_duplicates_settle_exactly_once PASSED [  1%]
+tests/concurrency/test_exactly_once.py::test_sequential_redeliveries_settle_exactly_once PASSED [  2%]
+tests/concurrency/test_exactly_once.py::test_duplicates_arriving_via_different_hop_paths_settle_once PASSED [  4%]
+tests/concurrency/test_exactly_once.py::test_exactly_once_holds_at_several_concurrency_levels[2] PASSED [  5%]
+tests/concurrency/test_exactly_once.py::test_exactly_once_holds_at_several_concurrency_levels[10] PASSED [  6%]
+tests/concurrency/test_exactly_once.py::test_exactly_once_holds_at_several_concurrency_levels[100] PASSED [  8%]
+tests/concurrency/test_exactly_once.py::test_exactly_once_holds_at_several_concurrency_levels[250] PASSED [  9%]
+tests/concurrency/test_exactly_once.py::test_distinct_packets_all_settle PASSED [ 10%]
+tests/concurrency/test_exactly_once.py::test_interleaved_distinct_and_duplicate_packets PASSED [ 12%]
+tests/concurrency/test_exactly_once.py::test_duplicate_is_rejected_before_postgres_is_touched PASSED [ 13%]
+tests/concurrency/test_exactly_once.py::test_only_one_claim_wins PASSED  [ 15%]
+tests/concurrency/test_exactly_once.py::test_settled_marker_is_written_after_settlement PASSED [ 16%]
+tests/concurrency/test_exactly_once.py::test_claim_is_released_when_a_packet_is_permanently_rejected PASSED [ 17%]
+tests/concurrency/test_exactly_once.py::test_postgres_unique_constraint_catches_a_duplicate_when_redis_forgets PASSED [ 19%]
+tests/concurrency/test_exactly_once.py::test_concurrent_settlement_after_redis_wipe_still_settles_once PASSED [ 20%]
+tests/concurrency/test_exactly_once.py::test_settled_row_matches_the_encrypted_instruction PASSED [ 21%]
+tests/concurrency/test_exactly_once.py::test_settlement_reports_settled_status PASSED [ 23%]
+tests/concurrency/test_exactly_once.py::test_hop_count_is_recorded PASSED [ 24%]
+tests/concurrency/test_freshness_window.py::test_packet_just_inside_the_window_settles PASSED [ 26%]
+tests/concurrency/test_freshness_window.py::test_packet_just_outside_the_window_is_expired PASSED [ 27%]
+tests/concurrency/test_freshness_window.py::test_packet_exactly_at_the_window_edge_is_accepted PASSED [ 28%]
+tests/concurrency/test_freshness_window.py::test_clearly_stale_packets_are_expired[age0] PASSED [ 30%]
+tests/concurrency/test_freshness_window.py::test_clearly_stale_packets_are_expired[age1] PASSED [ 31%]
+tests/concurrency/test_freshness_window.py::test_clearly_stale_packets_are_expired[age2] PASSED [ 32%]
+tests/concurrency/test_freshness_window.py::test_clearly_stale_packets_are_expired[age3] PASSED [ 34%]
+tests/concurrency/test_freshness_window.py::test_expired_packet_never_reaches_the_redis_claim PASSED [ 35%]
+tests/concurrency/test_freshness_window.py::test_expired_packet_leaves_no_trace_in_redis PASSED [ 36%]
+tests/concurrency/test_freshness_window.py::test_packet_within_clock_skew_tolerance_settles PASSED [ 38%]
+tests/concurrency/test_freshness_window.py::test_future_dated_packet_is_refused[ahead0] PASSED [ 39%]
+tests/concurrency/test_freshness_window.py::test_future_dated_packet_is_refused[ahead1] PASSED [ 41%]
+tests/concurrency/test_freshness_window.py::test_future_dated_packet_is_refused[ahead2] PASSED [ 42%]
+tests/concurrency/test_freshness_window.py::test_future_and_past_rejections_are_distinguishable PASSED [ 43%]
+tests/concurrency/test_freshness_window.py::test_expiry_rejection_is_persisted_with_its_reason PASSED [ 45%]
+tests/concurrency/test_freshness_window.py::test_metrics_count_expiries_separately PASSED [ 46%]
+tests/concurrency/test_freshness_window.py::test_default_window_accepts_a_recent_packet PASSED [ 47%]
+tests/concurrency/test_freshness_window.py::test_default_window_is_twenty_four_hours PASSED [ 49%]
+tests/concurrency/test_freshness_window.py::test_a_tampered_stale_packet_is_caught_by_the_signature_first PASSED [ 50%]
+tests/concurrency/test_freshness_window.py::test_expiry_does_not_break_the_duplicate_guarantee PASSED [ 52%]
+tests/concurrency/test_freshness_window.py::test_a_settled_packet_that_later_goes_stale_is_still_a_duplicate PASSED [ 53%]
+tests/concurrency/test_tamper_rejection.py::test_fifty_corrupted_packets_all_rejected_and_none_settle PASSED [ 54%]
+tests/concurrency/test_tamper_rejection.py::test_fifty_unspendable_packets_all_rejected_and_none_settle PASSED [ 56%]
+tests/concurrency/test_tamper_rejection.py::test_each_unspendable_packet_is_rejected_with_its_own_code[expired_30_days] PASSED [ 57%]
+tests/concurrency/test_tamper_rejection.py::test_each_unspendable_packet_is_rejected_with_its_own_code[future_dated_30_days] PASSED [ 58%]
+tests/concurrency/test_tamper_rejection.py::test_each_corruption_is_rejected[aad_bit_flip] PASSED [ 60%]
+tests/concurrency/test_tamper_rejection.py::test_each_corruption_is_rejected[ciphertext_bit_flip] PASSED [ 61%]
+tests/concurrency/test_tamper_rejection.py::test_each_corruption_is_rejected[created_at_rewrite] PASSED [ 63%]
+tests/concurrency/test_tamper_rejection.py::test_each_corruption_is_rejected[encrypted_key_bit_flip] PASSED [ 64%]
+tests/concurrency/test_tamper_rejection.py::test_each_corruption_is_rejected[nonce_bit_flip] PASSED [ 65%]
+tests/concurrency/test_tamper_rejection.py::test_each_corruption_is_rejected[packet_id_swap] PASSED [ 67%]
+tests/concurrency/test_tamper_rejection.py::test_each_corruption_is_rejected[sender_id_swap] PASSED [ 68%]
+tests/concurrency/test_tamper_rejection.py::test_each_corruption_is_rejected[signature_bit_flip] PASSED [ 69%]
+tests/concurrency/test_tamper_rejection.py::test_signed_region_corruptions_are_caught_by_the_signature[aad_bit_flip] PASSED [ 71%]
+tests/concurrency/test_tamper_rejection.py::test_signed_region_corruptions_are_caught_by_the_signature[ciphertext_bit_flip] PASSED [ 72%]
+tests/concurrency/test_tamper_rejection.py::test_signed_region_corruptions_are_caught_by_the_signature[created_at_rewrite] PASSED [ 73%]
+tests/concurrency/test_tamper_rejection.py::test_signed_region_corruptions_are_caught_by_the_signature[encrypted_key_bit_flip] PASSED [ 75%]
+tests/concurrency/test_tamper_rejection.py::test_signed_region_corruptions_are_caught_by_the_signature[nonce_bit_flip] PASSED [ 76%]
+tests/concurrency/test_tamper_rejection.py::test_signed_region_corruptions_are_caught_by_the_signature[packet_id_swap] PASSED [ 78%]
+tests/concurrency/test_tamper_rejection.py::test_signed_region_corruptions_are_caught_by_the_signature[sender_id_swap] PASSED [ 79%]
+tests/concurrency/test_tamper_rejection.py::test_signed_region_corruptions_are_caught_by_the_signature[signature_bit_flip] PASSED [ 80%]
+tests/concurrency/test_tamper_rejection.py::test_packet_signed_by_an_unknown_key_is_rejected PASSED [ 82%]
+tests/concurrency/test_tamper_rejection.py::test_replayed_ciphertext_under_a_new_header_is_rejected PASSED [ 83%]
+tests/concurrency/test_tamper_rejection.py::test_inner_outer_packet_id_mismatch_is_rejected PASSED [ 84%]
+tests/concurrency/test_tamper_rejection.py::test_malformed_bodies_are_rejected[] PASSED [ 86%]
+tests/concurrency/test_tamper_rejection.py::test_malformed_bodies_are_rejected[not json at all] PASSED [ 87%]
+tests/concurrency/test_tamper_rejection.py::test_malformed_bodies_are_rejected[{}] PASSED [ 89%]
+tests/concurrency/test_tamper_rejection.py::test_malformed_bodies_are_rejected[[]] PASSED [ 90%]
+tests/concurrency/test_tamper_rejection.py::test_malformed_bodies_are_rejected[{"packet_id": "not-a-uuid"}] PASSED [ 91%]
+tests/concurrency/test_tamper_rejection.py::test_malformed_bodies_are_rejected[null] PASSED [ 93%]
+tests/concurrency/test_tamper_rejection.py::test_malformed_bodies_are_rejected[{"packet_id": "041a59c4-edb8-426b-875f-cf9b3dd831d8", "sender_id": "device-alice"}] PASSED [ 94%]
+tests/concurrency/test_tamper_rejection.py::test_zero_amount_cannot_be_constructed_or_settled PASSED [ 95%]
+tests/concurrency/test_tamper_rejection.py::test_a_tampered_copy_does_not_block_the_genuine_packet PASSED [ 97%]
+tests/concurrency/test_tamper_rejection.py::test_tampered_and_genuine_arriving_together_settles_once PASSED [ 98%]
+tests/concurrency/test_tamper_rejection.py::test_rejections_record_a_specific_reason PASSED [100%]
+
+============================= 73 passed in 31.38s ==============================

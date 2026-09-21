@@ -27,6 +27,7 @@ delivery is delayed, duplicated, or out of order.
 | The guarantee survives losing the dedupe cache | Settle, then `FLUSHDB` Redis, then replay; the Postgres unique constraint refuses the second write |
 | The guarantee survives horizontal scaling | 5 Kubernetes replicas, 200 messages (10 distinct packets × 20 copies); exactly 10 settlements |
 | Tamper detection | 50 corrupted packets across 8 corruption types; 0 settle, all 50 recorded as rejected |
+| A captured packet does not stay spendable forever | A validly signed packet dated 30 days ago is refused as `PACKET_EXPIRED`, before it can even consume an idempotency key |
 | Settlement trusts nothing upstream | Corrupted packets published **directly to the queue**, bypassing relay and bridge, are still refused |
 | It holds under load | 10,516 requests, 0 failures, 0 duplicate settlements |
 
@@ -76,21 +77,28 @@ checks for a duplicate before writing anything.
 
 ### How exactly-once actually works
 
-Four mechanisms, in this order. The order *is* the guarantee.
+Five mechanisms, in this order. The order *is* the guarantee.
 
 1. **Ed25519 signature check.** Nothing below this line runs on unauthenticated
    data. Verification precedes the dedupe claim deliberately: if claiming came
    first, anyone could submit a corrupted copy, burn the idempotency key, and
    make the real payment look like a duplicate.
-2. **AAD/header consistency check.** The AES-GCM additional authenticated data
+2. **Freshness window** on the signed `created_at`: refuse anything older than
+   24 hours (`PACKET_EXPIRED`) or dated more than 5 minutes ahead
+   (`PACKET_NOT_YET_VALID`), both configurable. This is what stops a packet
+   captured off the mesh from being spendable forever — exactly-once prevents a
+   *second* settlement, but a captured packet that never settled once has
+   nothing to collide with. Placed before the claim so a stale packet cannot
+   burn the idempotency key belonging to the genuine packet.
+3. **AAD/header consistency check.** The AES-GCM additional authenticated data
    must match the packet's own header. Without this, an attacker can lift a
    sealed envelope onto a fresh header they sign themselves and carry the
    original AAD along, and the GCM tag check passes.
-3. **Atomic Redis claim** — `SET <key> claimed NX EX <ttl>`. `NX` makes it
+4. **Atomic Redis claim** — `SET <key> claimed NX EX <ttl>`. `NX` makes it
    atomic, so N concurrent consumers produce exactly one winner with no lock, no
    retry loop, and no read-then-write window. A duplicate returns here and never
    opens a database transaction.
-4. **Postgres unique constraint** on `idempotency_key`. Redis is the fast path,
+5. **Postgres unique constraint** on `idempotency_key`. Redis is the fast path,
    not the source of truth. This constraint is what makes the guarantee survive
    a cache flush, an evicted key, or an expired claim.
 
@@ -153,9 +161,9 @@ output committed alongside it. Nothing here is estimated.
 
 ### Test suite
 
-**298 tests, 298 passed**, 35.45s (220 unit, 29 integration, 49 concurrency).
-Command: `pytest`. Also green in CI against real Postgres, Redis and RabbitMQ
-service containers — see [CI](#ci) below.
+**322 tests, 322 passed**, 0 skipped, 48.60s (220 unit, 29 integration, 73
+concurrency). Command: `pytest`. Also green in CI against real Postgres, Redis
+and RabbitMQ service containers — see [CI](#ci) below.
 
 ### Exactly-once settlement
 
@@ -172,6 +180,43 @@ Redis 7.4.11, RabbitMQ 3.13.7.
 | Replay after a full Redis `FLUSHDB` | 1 + 1 replay | **1** | 1 |
 | 20 concurrent replays, each after a Redis flush | 20 | **1** | 1 |
 | Distinct payments (dedupe must not over-collapse) | 25 distinct | **25** | 25 |
+
+### Freshness window (replay defense)
+
+Artifacts: [`tests/concurrency/results/phase11-freshness-20260921T164125Z.txt`](tests/concurrency/results/phase11-freshness-20260921T164125Z.txt)
+(73 tests, 73 passed, 31.38s) and
+[`tests/integration/results/phase11-freshness-live-20260921T164629Z.txt`](tests/integration/results/phase11-freshness-live-20260921T164629Z.txt).
+
+| Packet age (window 3600s in the test) | Outcome |
+|---|---|
+| 3595s old (just inside) | **settles** |
+| exactly at the edge | **settles** |
+| 3605s old (just outside) | `PACKET_EXPIRED` |
+| 1, 7, 30, 365 days old | `PACKET_EXPIRED` |
+| 270s in the future (inside 300s skew) | **settles** |
+| 2h, 1d, 30d in the future | `PACKET_NOT_YET_VALID` |
+
+On the default 24-hour window: a 23h-old packet settles, a 25h-old one expires.
+
+A stale packet is refused **before** the Redis claim, proven by swapping in a
+dedupe store that raises if claimed — the same technique used to prove the
+duplicate path never touches Postgres. Its idempotency key is confirmed absent
+from Redis afterwards, so a stale packet cannot pre-emptively burn the key
+belonging to the genuine packet with those bytes.
+
+Verified live on the deployed stack: three validly signed packets published
+**directly to RabbitMQ**, bypassing relay and bridge so settlement alone judged
+them. The stale one and the future-dated one were refused (`expired: 1`,
+`not_yet_valid: 1`) and the fresh one settled, readable back at
+`id 10, amount_minor 31337`. Both rejections persisted with operator-legible
+detail: `packet is 2592000s old, older than the 86400s freshness window`. The
+`settled` counter in that transcript reads 5 rather than 1 because it is
+cumulative over the container's lifetime, which already included earlier
+verification packets.
+
+**What this does not do:** an attacker who submits a captured packet *within*
+the window still settles it once. The window removes the indefinite shelf life,
+it does not remove the exposure. See [Known limitations](#known-limitations).
 
 The 49 rejected duplicates in the headline case all reported
 `DUPLICATE_PACKET`, and a test asserts the duplicate path never opens a Postgres
@@ -351,6 +396,16 @@ scripts/         bootstrap, verification, load test, security gate
 Stated plainly, because a portfolio project that hides its rough edges is
 less useful than one that names them.
 
+- **The freshness window bounds replay, it does not eliminate it.** A packet
+  captured off the mesh and submitted *within* the 24-hour window still settles,
+  once. What the window removes is indefinite shelf life. It also does nothing
+  against an attacker replaying promptly with a synchronised clock — only
+  against long-delayed replay. Closing the rest needs an online freshness
+  challenge, which contradicts the offline premise. Shortening the window
+  narrows exposure but costs offline tolerance, since a genuine payer offline
+  for longer gets refused.
+- **Freshness is judged against the settlement host's clock.** There is no
+  trusted time source, so a badly wrong clock moves the window with it. Run NTP.
 - **Peer-to-peer mesh traffic is rate-limited as if it were public traffic.**
   The relay forwards its second hop to itself, and the limiter buckets by remote
   address, so internal forwarding competes with external submissions for the

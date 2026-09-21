@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
@@ -30,6 +30,7 @@ from shared.models import (
     EncryptedEnvelope,
     ErrorCode,
     PacketStatus,
+    PaymentInstruction,
     PaymentPacket,
     canonical_timestamp,
 )
@@ -110,6 +111,61 @@ CORRUPTIONS = {
 }
 
 
+def build_expired_packet(keys, amount_minor: int = 125_00) -> PaymentPacket:
+    """A perfectly valid packet that is simply too old to spend.
+
+    Not a corruption: it is correctly signed for its stated `created_at`, which
+    is what makes it interesting. This is the shape of a packet captured off
+    the mesh and held back, and it is now a first-class rejection reason
+    alongside the signature and decryption failures above.
+    """
+    created_at = datetime.now(UTC) - timedelta(days=30)
+    instruction = PaymentInstruction(
+        packet_id=uuid4(),
+        payer_id="device-alice",
+        payee_id="device-bob",
+        amount_minor=amount_minor,
+        currency="INR",
+        created_at=created_at,
+    )
+    return PaymentPacket.create(
+        instruction=instruction,
+        sender_id="device-alice",
+        signing_key=keys.signing_private,
+        recipient_public_key=keys.rsa_public,
+        created_at=created_at,
+    )
+
+
+def build_future_packet(keys, amount_minor: int = 125_00) -> PaymentPacket:
+    """A validly signed packet dated well into the future."""
+    created_at = datetime.now(UTC) + timedelta(days=30)
+    instruction = PaymentInstruction(
+        packet_id=uuid4(),
+        payer_id="device-alice",
+        payee_id="device-bob",
+        amount_minor=amount_minor,
+        currency="INR",
+        created_at=created_at,
+    )
+    return PaymentPacket.create(
+        instruction=instruction,
+        sender_id="device-alice",
+        signing_key=keys.signing_private,
+        recipient_public_key=keys.rsa_public,
+        created_at=created_at,
+    )
+
+
+#: Whole-packet rejection cases that are not byte corruptions. Each builds a
+#: cryptographically valid packet that must still be refused, and names the code
+#: it must be refused with.
+UNSPENDABLE_BUILDERS = {
+    "expired_30_days": (build_expired_packet, ErrorCode.PACKET_EXPIRED),
+    "future_dated_30_days": (build_future_packet, ErrorCode.PACKET_NOT_YET_VALID),
+}
+
+
 # --- The headline requirement ------------------------------------------------
 
 
@@ -137,6 +193,77 @@ async def test_fifty_corrupted_packets_all_rejected_and_none_settle(
 
     assert processor.metrics.settled == 0
     assert processor.metrics.rejected == TAMPERED_COUNT
+
+
+async def test_fifty_unspendable_packets_all_rejected_and_none_settle(
+    processor: SettlementProcessor, session_factory, keys
+) -> None:
+    """The same headline requirement, widened to every rejection reason.
+
+    Sibling of the test above rather than a replacement, because that one is
+    specifically about *corruption* and should stay that way. This batch mixes
+    the eight byte corruptions with two cryptographically valid but unspendable
+    packets, an expired one and a future-dated one, since staleness is now a
+    first-class rejection reason and belongs in the same guarantee.
+    """
+    corruption_names = list(CORRUPTIONS)
+    builder_names = list(UNSPENDABLE_BUILDERS)
+    case_count = len(corruption_names) + len(builder_names)
+
+    bodies: list[bytes] = []
+    expected_codes: list[ErrorCode | None] = []
+    for index in range(TAMPERED_COUNT):
+        slot = index % case_count
+        if slot < len(corruption_names):
+            packet = build_packet(keys, amount_minor=1_000 + index)
+            corrupt = CORRUPTIONS[corruption_names[slot]]
+            bodies.append(json.dumps(corrupt(packet)).encode("utf-8"))
+            expected_codes.append(None)  # any rejection code is acceptable
+        else:
+            builder, code = UNSPENDABLE_BUILDERS[builder_names[slot - len(corruption_names)]]
+            bodies.append(builder(keys, amount_minor=1_000 + index).model_dump_json().encode())
+            expected_codes.append(code)
+
+    outcomes = await asyncio.gather(*(processor.process(body) for body in bodies))
+
+    assert len(outcomes) == TAMPERED_COUNT
+    assert all(not outcome.settled for outcome in outcomes), "nothing here may settle"
+    assert all(outcome.status is PacketStatus.REJECTED for outcome in outcomes)
+
+    # The stale and future-dated packets must be refused for the right reason,
+    # not swept up under a generic code.
+    for outcome, expected in zip(outcomes, expected_codes, strict=True):
+        if expected is not None:
+            assert outcome.code is expected, f"expected {expected}, got {outcome.code}"
+
+    async with session_factory() as session:
+        assert await count_settlements(session) == 0
+        assert await count_rejections(session) == TAMPERED_COUNT
+
+    assert processor.metrics.settled == 0
+    assert processor.metrics.rejected == TAMPERED_COUNT
+    assert processor.metrics.expired > 0
+    assert processor.metrics.not_yet_valid > 0
+
+
+@pytest.mark.parametrize("case_name", sorted(UNSPENDABLE_BUILDERS))
+async def test_each_unspendable_packet_is_rejected_with_its_own_code(
+    processor: SettlementProcessor, session_factory, keys, case_name: str
+) -> None:
+    """A valid signature is not sufficient; the packet must also be spendable."""
+    builder, expected_code = UNSPENDABLE_BUILDERS[case_name]
+    packet = builder(keys)
+
+    # The signature really is valid, which is the whole point of these cases.
+    packet.verify(keys.signing_public)
+
+    outcome = await processor.process(packet.model_dump_json().encode("utf-8"))
+
+    assert not outcome.settled
+    assert outcome.code is expected_code
+    async with session_factory() as session:
+        assert await count_settlements(session) == 0
+        assert await count_rejections(session, expected_code.value) == 1
 
 
 @pytest.mark.parametrize("corruption_name", sorted(CORRUPTIONS))

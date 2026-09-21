@@ -59,13 +59,22 @@ interview context.
 4. Backend consumer validates signature, checks for tamper, and
    deduplicates using an atomic Redis operation before it ever
    touches the database
-5. Settlement is written to Postgres inside a transaction; duplicate
+5. Packets expire. A packet whose signed `created_at` is older than a
+   configurable freshness window (default 24 hours) is refused as
+   `PACKET_EXPIRED`, and one dated further ahead than a small clock-skew
+   tolerance (default 5 minutes) is refused as `PACKET_NOT_YET_VALID`.
+   This bounds replay of a packet that was captured off the mesh but never
+   submitted: exactly-once settlement prevents a second settlement, but
+   without an expiry a captured packet that has never settled stays
+   spendable forever. Checked before the deduplication step, so a stale
+   packet never consumes an idempotency key.
+6. Settlement is written to Postgres inside a transaction; duplicate
    packets are rejected at the Redis layer and never reach Postgres
-6. Full test suite: unit tests, a concurrency test that fires N
+7. Full test suite: unit tests, a concurrency test that fires N
    duplicate/simultaneous packets and asserts exactly one settles,
    and a tamper test that asserts N/N corrupted packets are rejected
-7. Load test script (Locust) producing real throughput/latency numbers
-8. Dockerized services, docker-compose for local orchestration,
+8. Load test script (Locust) producing real throughput/latency numbers
+9. Dockerized services, docker-compose for local orchestration,
    Kubernetes manifests (Deployment, Service, HPA) for orchestration
    demonstration (run locally against kind/minikube, not a cloud
    cluster, unless the developer sets one up separately)

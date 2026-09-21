@@ -79,6 +79,12 @@ REDIS_URL=redis://localhost:6379/0
 DEDUPE_TTL_SECONDS=86400
 DEDUPE_CLAIM_TTL_SECONDS=60
 
+# --- Freshness window (replay defense) ---
+# How old a packet may be and still settle, and how far ahead its timestamp may
+# be. See ARCHITECTURE.md "Why a freshness window is needed".
+FRESHNESS_WINDOW_SECONDS=86400
+CLOCK_SKEW_TOLERANCE_SECONDS=300
+
 # --- RabbitMQ ---
 RABBITMQ_USER={rabbitmq_user}
 RABBITMQ_PASSWORD={rabbitmq_password}

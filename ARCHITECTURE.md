@@ -160,7 +160,13 @@ is the correctness property; reordering any two of these breaks a guarantee.
 2. **Verify the Ed25519 signature** against the sender's registered public
    key, over the canonical signing bytes. Fail → reject
    (`INVALID_SIGNATURE`). Nothing below this line runs on unverified data.
-2a. **Check the AAD against the header**: `envelope.aad` must equal
+2a. **Freshness window**: the signed `created_at` must be no older than
+   `FRESHNESS_WINDOW_SECONDS` (default 86400, i.e. 24 hours) and no further in
+   the future than `CLOCK_SKEW_TOLERANCE_SECONDS` (default 300). Too old →
+   reject (`PACKET_EXPIRED`). Too far ahead → reject
+   (`PACKET_NOT_YET_VALID`). Both bounds are inclusive at the edge. See
+   "Why a freshness window is needed" below.
+2b. **Check the AAD against the header**: `envelope.aad` must equal
    `canonical_json({packet_id, sender_id})` for this packet's own header.
    Mismatch → reject (`MALFORMED_PAYLOAD`). See "Why the AAD must be checked
    explicitly" below; without this step the AAD binding is only incidentally
@@ -174,6 +180,55 @@ is the correctness property; reordering any two of these breaks a guarantee.
    envelope `packet_id` and `amount_minor > 0`. Mismatch → reject
    (`MALFORMED_PAYLOAD`).
 6. **Write the settlement** to Postgres inside a single transaction.
+
+### Why a freshness window is needed
+
+Exactly-once settlement stops a packet settling *twice*. It says nothing about
+a packet that has never settled *once*.
+
+Consider a packet captured off the mesh by an attacker, or simply held back and
+never forwarded. Its signature is valid. Its AAD is consistent. No settlement
+row exists for it, so the Postgres unique constraint has nothing to catch, and
+the Redis dedupe layer has never seen its key. Without an age check it is
+spendable indefinitely: submit it for the first time next month and it settles
+normally.
+
+So the freshness window bounds how long a captured packet stays useful. It is
+checked against `created_at` in the **outer signed header**, not the copy inside
+the encrypted instruction, for two reasons: the outer value is authenticated by
+the signature so it cannot have been altered in transit, and it is readable
+without decrypting, which lets the check run before the dedupe claim.
+
+The future bound exists because otherwise the past bound is trivially
+defeated. A sender who dates a packet a year ahead has a packet that will not
+look stale for a year. The tolerance is deliberately small, just enough to
+absorb unsynchronized clocks between a device and the settlement service.
+
+Two distinct error codes, rather than one:
+
+| Code | Means | Likely cause |
+|---|---|---|
+| `PACKET_EXPIRED` | older than the window | slow mesh, or a delayed replay attempt |
+| `PACKET_NOT_YET_VALID` | dated beyond the skew tolerance | broken device clock, or a forged timestamp trying to postpone expiry |
+
+They are separated because the operator response differs: a rise in the first
+suggests the mesh is slower than the window assumes and the window may need
+widening, while a rise in the second suggests clock problems or tampering.
+RULES.md already requires distinct codes so failure types can be told apart.
+
+**What this does not cover.** An attacker who captures a packet and submits it
+*within* the window still settles it, once. The window shortens the exposure;
+it does not eliminate it. Closing that gap entirely needs either a per-packet
+nonce registry consulted before first settlement (which is what the dedupe
+layer already is, so it only helps if the genuine packet arrives first) or an
+online freshness challenge, which contradicts the offline premise of the
+system. The window is the honest trade-off available to a store-and-forward
+design.
+
+**The window is a liveness constraint, not just a security knob.** It cannot be
+shorter than the longest offline stretch you want to support, because a genuine
+payer who is out of range for longer will have their payment refused. 24 hours
+is the default balance.
 
 ### Why the AAD must be checked explicitly
 

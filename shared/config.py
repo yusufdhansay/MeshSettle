@@ -38,6 +38,24 @@ class Settings(BaseSettings):
     #: the window inside which a redelivered duplicate is rejected by Redis
     #: without touching Postgres.
     dedupe_ttl_seconds: int = 86_400
+    #: How old a packet may be and still settle, in seconds. A packet whose
+    #: signed `created_at` is older than this is refused as expired.
+    #:
+    #: This bounds how long a captured-but-unsubmitted packet stays useful to
+    #: an attacker. It cannot be shorter than the longest legitimate offline
+    #: window you want to support, because a genuine payer who is out of range
+    #: for longer than this will have their payment refused. 24 hours is the
+    #: default trade-off: long enough for a realistic offline stretch, short
+    #: enough that a stolen packet does not stay spendable indefinitely.
+    freshness_window_seconds: int = Field(default=86_400, ge=1)
+    #: How far into the future a packet's `created_at` may be, in seconds.
+    #:
+    #: Needed because sender and settlement clocks are not synchronized, so a
+    #: legitimate packet can look slightly future-dated. Deliberately small:
+    #: a generous tolerance here is an attacker's way to postpone expiry, by
+    #: forging a timestamp that will still look fresh long after capture.
+    clock_skew_tolerance_seconds: int = Field(default=300, ge=0)
+
     #: How long an in-flight claim is held before it is considered abandoned.
     #: Deliberately short: if a consumer dies between claiming and committing,
     #: the broker redelivers the message and the retry must be able to win the

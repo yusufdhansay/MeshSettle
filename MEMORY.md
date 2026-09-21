@@ -4,7 +4,7 @@ This file is the persistent context across sessions. Read it first,
 every time, before doing anything else.
 
 ## Current Phase
-All 11 phases (0–10) complete. Nothing in progress.
+All phases 0–11 complete. Nothing in progress.
 
 ## Completed Phases
 - Phase 0 — Scaffolding: six root docs, folder tree per ARCHITECTURE.md,
@@ -79,8 +79,51 @@ All 11 phases (0–10) complete. Nothing in progress.
   correction above).
   Commit `8c2341f` — 2026-09-21
 
+- Phase 11 — Freshness window for replay defense: a `created_at` age check
+  in the settlement pipeline, placed after signature verification and
+  before the AAD check and the Redis claim. Two new error codes
+  (`PACKET_EXPIRED`, `PACKET_NOT_YET_VALID`), two new config settings, 24
+  new tests. Suite now 322 passing, 0 skipped.
+  Commit `<phase11>` — 2026-09-21
+
 ## In Progress
-Nothing. The build is complete.
+Nothing. The build is complete through Phase 11.
+
+## Phase 11: the freshness window
+**The gap it closes.** Exactly-once settlement prevents a packet settling
+*twice*. It said nothing about a packet that had never settled *once*. A
+packet captured off the mesh (or simply held back and never forwarded) had a
+valid signature, a consistent AAD, no settlement row, and no Redis key — so
+nothing in the pipeline looked at its age and it stayed spendable
+indefinitely. Found by auditing the pipeline against the three properties
+the project claims, not by a failing test.
+
+**What is checked.** The signed outer `created_at` must be no older than
+`FRESHNESS_WINDOW_SECONDS` (default 86400) and no further ahead than
+`CLOCK_SKEW_TOLERANCE_SECONDS` (default 300). Both bounds inclusive at the
+edge.
+
+**Pipeline position** is now: parse → verify signature → **freshness (2a)** →
+AAD/header (2b) → Redis `SET NX` claim → decrypt → inner/outer cross-check →
+Postgres → `mark_settled`. Updated in the `SettlementProcessor` module
+docstring and in ARCHITECTURE.md's ordering list.
+
+**API surface added:**
+- `ErrorCode.PACKET_EXPIRED`, `ErrorCode.PACKET_NOT_YET_VALID`
+- `SettlementProcessor(..., freshness_window_seconds=None,
+  clock_skew_tolerance_seconds=None)` — injectable so tests drive the
+  boundary without sleeping; `None` falls back to config
+- `SettlementProcessor._check_freshness(packet)` returning an outcome or
+  `None`, and `_reject_before_claim(code, detail, packet)` for rejections
+  that hold no claim
+- `SettlementMetrics.expired` / `.not_yet_valid`, both in `.snapshot()`
+- `MetricsView` gained `expired` and `not_yet_valid` — **required**, because
+  it is `extra="forbid"` and is constructed as
+  `MetricsView(**metrics.snapshot())`, so adding a snapshot key without
+  adding the field would have broken `GET /metrics` at runtime
+- `settings.freshness_window_seconds`, `settings.clock_skew_tolerance_seconds`
+- Config echoed into `.env.example`, `scripts/bootstrap_env.py` and
+  `k8s/configmap.yaml`; the demo UI shows an "Expired refused" counter
 
 ## How the README numbers were checked
 Before committing Phase 10 I verified each published figure against its
@@ -466,6 +509,42 @@ fixtures (`KeyBundle` with `.signing_private`, `.signing_public`,
   `/usr/local/opt/python@3.12/bin/python3.12` (3.12.9) for the venv
   instead, so we stay on the specified 3.12 line and still satisfy the
   RULES.md requirement to format with black.
+- **Two error codes for the freshness window, not one.** The brief left this
+  to me. `PACKET_EXPIRED` (too old) and `PACKET_NOT_YET_VALID` (too far
+  ahead) are separate because the operator response differs: a rise in the
+  first says the mesh is slower than the window assumes and the window may
+  need widening, while a rise in the second says clocks are broken or
+  someone is forging timestamps. Collapsing them would have hidden that
+  distinction behind one counter, and RULES.md already requires distinct
+  codes so failure types can be told apart. Documented in ARCHITECTURE.md
+  with a table.
+- **The freshness check reads the OUTER `created_at`, not the inner one.**
+  The instruction inside the envelope also carries a `created_at`, but the
+  outer header value is the one used, for two reasons: it is covered by the
+  signature so it cannot be altered in transit, and it is readable without
+  decrypting, which is what allows the check to run before the Redis claim.
+  A malicious *sender* could set the outer timestamp to now and the inner to
+  something else, but that buys nothing: the outer value is what bounds
+  spendability, and the inner value is not used for any freshness decision.
+- **Window edges are inclusive.** A packet exactly `FRESHNESS_WINDOW_SECONDS`
+  old is accepted, and one exactly at the skew tolerance is accepted. The
+  boundary has to fall somewhere, and a window configured as "24 hours"
+  should accept a packet 24 hours old rather than refuse it by a
+  microsecond. Asserted on both sides in
+  `test_packet_just_inside_the_window_settles` /
+  `test_packet_just_outside_the_window_is_expired`.
+- **Precedence when a packet is both already-settled and stale**: the stale
+  check wins, because it runs before the dedupe claim. So re-presenting an
+  old already-settled packet reports `PACKET_EXPIRED` rather than
+  `DUPLICATE_PACKET`. This is a reporting detail, not a correctness one — it
+  still never settles twice, and
+  `test_a_settled_packet_that_later_goes_stale_is_still_a_duplicate` pins the
+  behaviour down with a comment explaining why either code is acceptable.
+- **The window is a liveness constraint as much as a security one.** It
+  cannot be set shorter than the longest offline stretch the deployment wants
+  to support, or genuine late payments get refused. Noted in the config
+  comments, ARCHITECTURE.md and `k8s/configmap.yaml` so nobody tightens it to
+  "5 minutes" thinking it is purely a hardening knob.
 - **`services/ui/` added as a fifth service.** ARCHITECTURE.md's tree lists
   four, but DESIGN.md requires a demo UI and it needs somewhere to live.
   Putting it on the sender would have meant either CORS on two payment-path
@@ -683,6 +762,25 @@ fixtures (`KeyBundle` with `.signing_private`, `.signing_public`,
   a system whose whole point is settlement correctness.
 
 ## Known Issues
+- **The freshness window bounds replay; it does not eliminate it.** Stated
+  plainly because it would be easy to over-read what Phase 11 achieved. An
+  attacker who captures a packet off the mesh and submits it *within* the
+  window still settles it, once. What the window removes is the indefinite
+  shelf life: a packet stolen today is worthless tomorrow rather than
+  worthless never. It also does nothing against an attacker with a
+  synchronised clock replaying promptly — only against long-delayed replay.
+  Closing the remaining gap properly needs either the genuine packet to reach
+  settlement first (which the dedupe layer already handles, so it is a race,
+  not a guarantee) or an online freshness challenge, which contradicts the
+  offline premise of the whole system. Shortening the window narrows the
+  exposure but costs offline tolerance, since a genuine payer offline longer
+  than the window gets refused. 24 hours is a trade-off, not a solution.
+- **A stale packet is judged against the settlement service's clock.** There
+  is no trusted time source. If the settlement host's clock is badly wrong,
+  the window moves with it: a clock set far forward would expire valid
+  packets, and one set far back would extend the shelf life of stolen ones.
+  Real deployments should run NTP and monitor clock drift; nothing in this
+  repo enforces that.
 - **Peer-to-peer mesh traffic is rate-limited as if it were public traffic.**
   The relay forwards hop 2 to itself, and slowapi buckets by remote address,
   so internal forwarding competes with external submissions for the same
@@ -842,6 +940,46 @@ fixtures (`KeyBundle` with `.signing_private`, `.signing_public`,
     packet ids settled twice.** This is the check that justifies the HPA:
     five independent pods, each with its own Redis connection and database
     session, racing on the same keys.
+- **Phase 11 freshness window.** Artifacts:
+  `tests/concurrency/results/phase11-freshness-20260921T164125Z.txt`
+  (73 tests, 73 passed, 31.38s; Python 3.12.9, PostgreSQL 16.15, Redis
+  7.4.11, RabbitMQ 3.13.7) and
+  `tests/integration/results/phase11-freshness-live-20260921T164629Z.txt`.
+  - New tests: **24** (21 in `tests/concurrency/test_freshness_window.py`,
+    3 added to `test_tamper_rejection.py`). The concurrency directory went
+    from 49 to **73** tests.
+  - Full suite: **322 tests, 322 passed, 0 skipped**, 48.60s
+    (220 unit + 29 integration + 73 concurrency). Was 298 before this phase;
+    298 + 24 = 322, so nothing was dropped or replaced.
+  - Boundary behaviour, measured with a 3600s window: a packet 3595s old
+    settles, one 3605s old is refused `PACKET_EXPIRED`, and one exactly at
+    the edge is accepted. Ages of 1, 7, 30 and 365 days all refused.
+  - Future-dated: 270s ahead settles (inside the 300s tolerance); 2h, 1d and
+    30d ahead are refused `PACKET_NOT_YET_VALID`.
+  - Default config verified separately: 23h old settles, 25h old expires.
+  - **Ordering proven, not assumed.** `test_expired_packet_never_reaches_the_redis_claim`
+    swaps in a dedupe store whose `claim`/`mark_settled`/`release_claim` all
+    raise `AssertionError`, mirroring how
+    `test_duplicate_is_rejected_before_postgres_is_touched` proves the
+    duplicate path never touches Postgres. A separate test confirms the
+    stale packet's idempotency key is still absent from Redis afterwards, so
+    a stale packet cannot pre-emptively burn the key belonging to the genuine
+    packet with those bytes.
+  - **Live, on the deployed stack**: three validly signed packets published
+    **directly to RabbitMQ**, bypassing relay and bridge so settlement alone
+    judged them. Result: `expired: 1`, `not_yet_valid: 1`, and the fresh
+    packet settled. Note the `settled` counter in that transcript reads 5,
+    not 1 — it is cumulative over the container's lifetime and already
+    included earlier verification packets; the fresh packet's own settlement
+    is confirmed separately by its row (`id 10, amount_minor 31337`). Worth
+    recording because quoting that 5 as "this run settled 5" would be wrong.
+    The two rejections persisted with operator-legible detail —
+    `packet is 2592000s old, older than the 86400s freshness window` and
+    `packet is dated 2591999s in the future, beyond the 300s clock-skew tolerance`.
+    The fresh packet settled normally (`id 10, amount_minor 31337`).
+  - Regression check: `scripts/verify_compose.sh` **ALL CHECKS PASSED**
+    (13 checks), security gate still passes, `pip-audit` still reports
+    **No known vulnerabilities found**.
 - **Phase 9 demo UI verified live against the running stack**, raw output in
   `tests/integration/results/phase9-ui-verification-20260921T154436Z.txt`,
   run 2026-09-21T15:44:36Z:

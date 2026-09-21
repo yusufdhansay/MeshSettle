@@ -115,6 +115,16 @@ class ErrorCode(StrEnum):
     INVALID_SIGNATURE = "INVALID_SIGNATURE"
     DUPLICATE_PACKET = "DUPLICATE_PACKET"
     DECRYPTION_FAILED = "DECRYPTION_FAILED"
+    #: The packet's signed `created_at` is older than the freshness window.
+    #: Distinct from DUPLICATE_PACKET: this packet may never have been seen
+    #: before, it is simply too old to still be spendable.
+    PACKET_EXPIRED = "PACKET_EXPIRED"
+    #: The packet's signed `created_at` is further in the future than the
+    #: clock-skew tolerance allows. Kept separate from PACKET_EXPIRED because
+    #: the two mean very different things operationally: expired suggests a
+    #: slow mesh or a delayed replay, future-dated suggests a broken clock or
+    #: a forged timestamp trying to postpone expiry.
+    PACKET_NOT_YET_VALID = "PACKET_NOT_YET_VALID"
     INTERNAL_ERROR = "INTERNAL_ERROR"
 
 

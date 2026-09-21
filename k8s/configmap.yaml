@@ -31,6 +31,17 @@ data:
   # enough that a crashed pod's claim frees up quickly for a redelivery.
   DEDUPE_CLAIM_TTL_SECONDS: "60"
 
+  # --- Freshness window (replay defense) ---
+  # How old a packet may be and still settle. This bounds how long a packet
+  # captured off the mesh remains spendable. It is also a liveness constraint:
+  # it must not be shorter than the longest offline stretch you intend to
+  # support, or genuine late payments will be refused as expired.
+  FRESHNESS_WINDOW_SECONDS: "86400"
+  # How far into the future a packet's created_at may be, to absorb clock skew
+  # between devices and this service. Keep it small: a generous tolerance is how
+  # a forged timestamp postpones expiry.
+  CLOCK_SKEW_TOLERANCE_SECONDS: "300"
+
   # --- RabbitMQ (host only; credentials are in the Secret) ---
   RABBITMQ_HOST: "meshsettle-rabbitmq"
   RABBITMQ_PORT: "5672"

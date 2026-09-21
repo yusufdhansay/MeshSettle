@@ -295,6 +295,7 @@ async function refreshMetrics() {
     el("metric-settled").textContent = metrics.settled;
     el("metric-duplicates").textContent = metrics.duplicates;
     el("metric-invalid").textContent = metrics.invalid_signature;
+    el("metric-expired").textContent = metrics.expired;
     el("metric-queue").textContent =
       metrics.queue_depth == null ? "n/a" : metrics.queue_depth;
   } catch {

@@ -6,16 +6,21 @@ drive the real code path rather than a simplified stand-in.
 
 The order of operations is the correctness property. From ARCHITECTURE.md:
 
-1. Parse and validate the packet          -> MALFORMED_PAYLOAD
-2. Verify the Ed25519 signature           -> INVALID_SIGNATURE
-3. Atomic Redis claim (``SET NX``)        -> DUPLICATE_PACKET
-4. Decrypt the envelope                   -> DECRYPTION_FAILED
-5. Cross-check the inner instruction      -> MALFORMED_PAYLOAD
-6. Write the settlement in a transaction
+1.  Parse and validate the packet         -> MALFORMED_PAYLOAD
+2.  Verify the Ed25519 signature          -> INVALID_SIGNATURE
+2a. Freshness window on ``created_at``    -> PACKET_EXPIRED / PACKET_NOT_YET_VALID
+2b. AAD/header consistency                -> MALFORMED_PAYLOAD
+3.  Atomic Redis claim (``SET NX``)       -> DUPLICATE_PACKET
+4.  Decrypt the envelope                  -> DECRYPTION_FAILED
+5.  Cross-check the inner instruction     -> MALFORMED_PAYLOAD
+6.  Write the settlement in a transaction
 
 Swapping any two of these breaks something:
 
 * verifying after decrypting would run crypto on unauthenticated input
+* checking freshness before verifying would let an unauthenticated field
+  decide the outcome; checking it after the claim would spend an idempotency
+  key on a packet that is going to be refused anyway
 * claiming before verifying would let an attacker burn idempotency keys for
   packets they cannot sign, poisoning future legitimate settlements
 * claiming after the database write would open the exact double-settlement
@@ -32,6 +37,7 @@ rejecting them before the database.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from uuid import UUID
 
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -42,6 +48,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from services.settlement.db import Settlement, record_rejection
 from services.settlement.dedupe import ClaimOutcome, DedupeStore
+from shared.config import settings
 from shared.crypto import DecryptionError, SignatureVerificationError
 from shared.logging import get_logger, safe_fingerprint
 from shared.models import ErrorCode, PacketStatus, PaymentInstruction, PaymentPacket
@@ -78,6 +85,8 @@ class SettlementMetrics:
     invalid_signature: int = 0
     malformed: int = 0
     decryption_failed: int = 0
+    expired: int = 0
+    not_yet_valid: int = 0
     internal_errors: int = 0
     _by_code: dict[str, int] = field(default_factory=dict)
 
@@ -98,6 +107,10 @@ class SettlementMetrics:
                 self.malformed += 1
             case ErrorCode.DECRYPTION_FAILED:
                 self.decryption_failed += 1
+            case ErrorCode.PACKET_EXPIRED:
+                self.expired += 1
+            case ErrorCode.PACKET_NOT_YET_VALID:
+                self.not_yet_valid += 1
             case ErrorCode.INTERNAL_ERROR:
                 self.internal_errors += 1
 
@@ -113,6 +126,8 @@ class SettlementMetrics:
             "invalid_signature": self.invalid_signature,
             "malformed": self.malformed,
             "decryption_failed": self.decryption_failed,
+            "expired": self.expired,
+            "not_yet_valid": self.not_yet_valid,
             "internal_errors": self.internal_errors,
         }
 
@@ -128,12 +143,26 @@ class SettlementProcessor:
         sender_public_key: Ed25519PublicKey,
         settlement_private_key: rsa.RSAPrivateKey,
         metrics: SettlementMetrics | None = None,
+        freshness_window_seconds: int | None = None,
+        clock_skew_tolerance_seconds: int | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._dedupe = dedupe
         self._sender_public_key = sender_public_key
         self._settlement_private_key = settlement_private_key
         self.metrics = metrics or SettlementMetrics()
+        # Injectable so tests can drive the boundary without sleeping, and so
+        # a deployment can tighten the window without a code change.
+        self._freshness_window_seconds = (
+            settings.freshness_window_seconds
+            if freshness_window_seconds is None
+            else freshness_window_seconds
+        )
+        self._clock_skew_tolerance_seconds = (
+            settings.clock_skew_tolerance_seconds
+            if clock_skew_tolerance_seconds is None
+            else clock_skew_tolerance_seconds
+        )
 
     async def process(self, raw_body: bytes) -> SettlementOutcome:
         """Run one packet through the pipeline."""
@@ -188,7 +217,32 @@ class SettlementProcessor:
                 packet_id=packet.packet_id,
             )
 
-        # --- 2a. AAD/header consistency --------------------------------------
+        # --- 2a. Freshness window --------------------------------------------
+        # Reject a packet that is too old, or dated too far in the future.
+        #
+        # Why this is needed at all: exactly-once stops a packet settling
+        # twice, but says nothing about a packet that has never settled once.
+        # Without an expiry, a packet captured off the mesh (or simply held
+        # back) stays spendable forever, because nothing else in the pipeline
+        # looks at its age. The Postgres unique constraint only helps after a
+        # first settlement exists.
+        #
+        # Why here, straight after signature verification:
+        #   * `created_at` is in the OUTER signed header, so it is already
+        #     authenticated at this point and cannot have been altered in
+        #     transit. No decryption is needed to read it.
+        #   * it is before the Redis claim on purpose. Spending an idempotency
+        #     key on a packet that is going to be refused anyway would be
+        #     wasteful, and would briefly occupy a key that belongs to the
+        #     genuine packet with those exact bytes.
+        #   * it is the cheapest check that can reject a whole packet, so it
+        #     belongs as early as the "only act on authenticated data" rule
+        #     permits.
+        freshness = await self._check_freshness(packet)
+        if freshness is not None:
+            return freshness
+
+        # --- 2b. AAD/header consistency --------------------------------------
         # The envelope's AAD must be exactly the one this header implies.
         #
         # Without this check the AAD binding is only incidentally effective. An
@@ -363,6 +417,71 @@ class SettlementProcessor:
             idempotency_key=idempotency_key,
             packet_id=packet.packet_id,
             settlement_id=settlement.id,
+        )
+
+    async def _check_freshness(self, packet: PaymentPacket) -> SettlementOutcome | None:
+        """Refuse a packet that is stale or improbably future-dated.
+
+        Returns ``None`` when the packet is inside the window, so the caller
+        can carry on. Returns a rejection outcome otherwise.
+
+        Both bounds are inclusive at the edge: a packet exactly
+        ``freshness_window_seconds`` old is still accepted, and one exactly
+        ``clock_skew_tolerance_seconds`` in the future is still accepted. The
+        boundary has to fall somewhere, and accepting the exact edge means a
+        window configured as "24 hours" really does accept a packet 24 hours
+        old rather than refusing it by a microsecond.
+        """
+        now = datetime.now(UTC)
+        created_at = packet.created_at
+        age_seconds = (now - created_at).total_seconds()
+
+        if age_seconds > self._freshness_window_seconds:
+            detail = (
+                f"packet is {int(age_seconds)}s old, older than the "
+                f"{self._freshness_window_seconds}s freshness window"
+            )
+            return await self._reject_before_claim(ErrorCode.PACKET_EXPIRED, detail, packet)
+
+        if -age_seconds > self._clock_skew_tolerance_seconds:
+            detail = (
+                f"packet is dated {int(-age_seconds)}s in the future, beyond the "
+                f"{self._clock_skew_tolerance_seconds}s clock-skew tolerance"
+            )
+            return await self._reject_before_claim(ErrorCode.PACKET_NOT_YET_VALID, detail, packet)
+
+        return None
+
+    async def _reject_before_claim(
+        self,
+        code: ErrorCode,
+        detail: str,
+        packet: PaymentPacket,
+    ) -> SettlementOutcome:
+        """Log, persist, and build a rejection for a packet refused pre-claim.
+
+        No claim is held at this point, so there is nothing to release.
+        """
+        idempotency_key = packet.idempotency_key
+        logger.warning(
+            "settlement.packet_rejected",
+            reason=code.value,
+            packet_id=str(packet.packet_id),
+            idempotency_key=idempotency_key,
+            detail=detail,
+        )
+        await self._persist_rejection(
+            code,
+            detail,
+            idempotency_key=idempotency_key,
+            packet_id=packet.packet_id,
+        )
+        return SettlementOutcome(
+            status=PacketStatus.REJECTED,
+            code=code,
+            detail=detail,
+            idempotency_key=idempotency_key,
+            packet_id=packet.packet_id,
         )
 
     async def _reject_after_claim(

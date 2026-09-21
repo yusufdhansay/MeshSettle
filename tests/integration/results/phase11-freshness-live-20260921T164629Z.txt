@@ -1,0 +1,49 @@
+MeshSettle Phase 11 live freshness verification (docker compose stack)
+UTC: 2026-09-21T16:46:29Z
+Docker: Docker version 29.7.2, build a7dcaa6
+
+Three validly signed packets were published DIRECTLY to RabbitMQ, bypassing
+relay and bridge, so the settlement service is the only thing judging them:
+  stale  : created_at 30 days in the past
+  future : created_at 30 days in the future
+  fresh  : created_at 1 minute in the past
+All three had valid Ed25519 signatures (asserted before publishing).
+
+=== settlement metrics after processing ===
+{
+    "settled": 5,
+    "rejected": 60,
+    "duplicates": 48,
+    "invalid_signature": 10,
+    "malformed": 0,
+    "decryption_failed": 0,
+    "expired": 1,
+    "not_yet_valid": 1,
+    "internal_errors": 0,
+    "queue_depth": 0
+}
+
+=== rejected_packets rows for the new codes ===
+PACKET_EXPIRED|packet is 2592000s old, older than the 86400s freshness window
+PACKET_NOT_YET_VALID|packet is dated 2591999s in the future, beyond the 300s clock-skew tolerance
+
+=== the fresh packet settled normally ===
+{"id":10,"idempotency_key":"settle:16c629fa262a0dff4a845ee6222f3f6111d4fff475b0f7cdc148cb0058ad0278","packet_id":"9b15521a-2f9f-409b-9bcd-2c5e01dab31d","sender_id":"device-alice","payer_id":"device-alice","payee_id":"device-bob","amount_minor":31337,"currency":"INR","packet_created_at":"2026-09-21T16:43:07.805191Z","settled_at":"2026-09-21T16:44:07.961648Z","hop_count":0}
+
+=== the pre-existing compose verification still passes unchanged ===
+  PASS  sender healthy
+  PASS  mesh_relay healthy
+  PASS  bridge healthy
+  PASS  settlement healthy
+  PASS  settlement is consuming from the queue
+  PASS  settled with the exact amount that was sealed
+  PASS  recorded 2 mesh hops
+  PASS  exactly 1 settlement row for 25 concurrent copies
+  PASS  relay rejected all 10 corrupted packets with 400
+  PASS  bridge rejected a corrupted packet with INVALID_SIGNATURE
+  PASS  settlement independently rejected all 10 corrupted packets
+  PASS  no corrupted packet settled
+  PASS  rejections persisted to rejected_packets (50 rows)
+final settlement rows : 16
+final metrics         : {"settled":7,"rejected":94,"duplicates":72,"invalid_signature":20,"malformed":0,"decryption_failed":0,"expired":1,"not_yet_valid":1,"internal_errors":0,"queue_depth":0}
+ALL CHECKS PASSED
