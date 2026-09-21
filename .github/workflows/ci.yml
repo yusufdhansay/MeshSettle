@@ -1,0 +1,275 @@
+name: CI
+
+# Runs on every push and pull request. Four jobs:
+#   lint      — ruff and black, fast feedback
+#   test      — the full suite against REAL Postgres, Redis and RabbitMQ
+#   security  — dependency audit plus the repo's own security gate
+#   build     — all four service images
+#
+# The test job deliberately provisions real infrastructure rather than letting
+# the integration and concurrency tests skip. Those tests are the entire point
+# of this project: they assert that Redis `SET NX` and a Postgres unique
+# constraint really do produce exactly-once settlement under concurrency. A
+# green CI run that silently skipped them would be worse than no CI at all.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref to avoid queueing up stale work.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  lint:
+    name: Lint and format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install dev dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: ruff
+        run: ruff check shared/ services/ tests/ scripts/ migrations/
+
+      - name: black
+        run: black --check shared/ services/ tests/ scripts/ migrations/
+
+  test:
+    name: Tests (real Postgres, Redis, RabbitMQ)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: meshsettle
+          # CI-only throwaway credential for an ephemeral container that is
+          # reachable only from this job. Not a secret, and not used anywhere else.
+          POSTGRES_PASSWORD: ci-postgres-password
+          POSTGRES_DB: meshsettle
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U meshsettle -d meshsettle"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+      rabbitmq:
+        image: rabbitmq:3.13
+        ports:
+          - 5672:5672
+        # RabbitMQ takes appreciably longer to boot than the other two, hence
+        # the larger retry budget.
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 10s
+          --health-timeout 10s
+          --health-retries 30
+          --health-start-period 30s
+
+    env:
+      MESHSETTLE_TEST_PG_DSN: postgresql+asyncpg://meshsettle:ci-postgres-password@localhost:5432/meshsettle
+      MESHSETTLE_TEST_REDIS_URL: redis://localhost:6379/0
+      MESHSETTLE_TEST_AMQP_URL: amqp://guest:guest@localhost:5672/
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Confirm the infrastructure-backed tests are not skipping
+        # If the service containers were unreachable the integration and
+        # concurrency tests would skip and the suite would still pass. Assert
+        # that they actually collected and ran.
+        run: |
+          python - <<'PY'
+          import asyncio
+          import os
+
+          import aio_pika
+          import redis.asyncio as aioredis
+          from sqlalchemy.ext.asyncio import create_async_engine
+
+
+          async def main() -> None:
+              engine = create_async_engine(os.environ["MESHSETTLE_TEST_PG_DSN"])
+              async with engine.connect():
+                  pass
+              await engine.dispose()
+              print("postgres reachable")
+
+              client = aioredis.from_url(os.environ["MESHSETTLE_TEST_REDIS_URL"])
+              await client.ping()
+              await client.aclose()
+              print("redis reachable")
+
+              conn = await aio_pika.connect_robust(os.environ["MESHSETTLE_TEST_AMQP_URL"])
+              await conn.close()
+              print("rabbitmq reachable")
+
+
+          asyncio.run(main())
+          PY
+
+      - name: Run migrations against the CI database
+        env:
+          POSTGRES_USER: meshsettle
+          POSTGRES_PASSWORD: ci-postgres-password
+          POSTGRES_DB: meshsettle
+          POSTGRES_HOST: localhost
+          POSTGRES_PORT: "5432"
+        run: |
+          alembic upgrade head
+          alembic downgrade base
+          alembic upgrade head
+
+      - name: Full test suite
+        run: pytest -v --durations=15
+
+      - name: Fail if infrastructure tests were skipped
+        # A skip here means the exactly-once and tamper suites did not run.
+        run: |
+          pytest -m integration -q --collect-only >/dev/null
+          SKIPPED=$(pytest -m integration -q 2>&1 | grep -c "skipped" || true)
+          if [ "$SKIPPED" != "0" ]; then
+            echo "integration tests reported skips; infrastructure was not reachable" >&2
+            pytest -m integration -q -rs 2>&1 | tail -30
+            exit 1
+          fi
+          echo "all integration tests ran"
+
+  security:
+    name: Security pass
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so the secret scan can inspect every commit, not just
+          # the tip. A key that was committed and later removed is still leaked.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Dependency vulnerability audit
+        # Audits the installed dependency tree against the PyPI advisory
+        # database and fails on any known vulnerability.
+        #
+        # --skip-editable is required because this repo installs itself in
+        # editable mode and `meshsettle` is not published to PyPI, so auditing
+        # it is meaningless. --strict cannot be combined with it: strict treats
+        # any skip, including that one, as an error. The exit code still fails
+        # the job on a real finding, which is what matters.
+        run: pip-audit --skip-editable --progress-spinner off
+
+      - name: Repository security gate
+        run: ./scripts/security_check.sh
+
+  build:
+    name: Build images
+    runs-on: ubuntu-latest
+    needs: [lint]
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [sender, mesh_relay, bridge, settlement]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build ${{ matrix.service }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: services/${{ matrix.service }}/Dockerfile
+          # Built but not pushed: this repo has no registry configured, and
+          # pushing images from CI is a deployment decision, not a test one.
+          push: false
+          load: true
+          tags: meshsettle/${{ matrix.service }}:ci
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+      - name: Verify the image runs as a non-root user
+        run: |
+          USER_ID=$(docker run --rm --entrypoint id meshsettle/${{ matrix.service }}:ci -u)
+          echo "image runs as uid $USER_ID"
+          if [ "$USER_ID" = "0" ]; then
+            echo "image runs as root, which the Dockerfiles explicitly avoid" >&2
+            exit 1
+          fi
+
+  compose:
+    name: Validate compose
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate throwaway env files
+        # docker compose reads .env and .env.infra, which are gitignored. The
+        # bootstrap script generates both with fresh keys, so validation runs
+        # against a realistic configuration without any committed secret.
+        run: python scripts/bootstrap_env.py
+
+      - name: Validate the compose file
+        run: docker compose config --quiet
+
+      - name: Confirm no secret files would be committed
+        run: |
+          for file in .env .env.infra; do
+            if git check-ignore -q "$file"; then
+              echo "$file is correctly gitignored"
+            else
+              echo "$file is NOT gitignored" >&2
+              exit 1
+            fi
+          done

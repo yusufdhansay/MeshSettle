@@ -1,7 +1,7 @@
 """create settlements and rejected_packets
 
 Revision ID: 9fe74eee6261
-Revises: 
+Revises:
 Create Date: 2026-09-21 17:32:26.529666
 """
 

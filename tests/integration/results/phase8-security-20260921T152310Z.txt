@@ -1,0 +1,82 @@
+MeshSettle Phase 8 security evidence
+UTC    : 2026-09-21T15:23:10Z
+Python : Python 3.12.9
+
+=== pip-audit (dependency vulnerability scan) ===
+command: pip-audit --skip-editable --progress-spinner off
+No known vulnerabilities found
+Name       Skip Reason
+---------- -------------------------------
+meshsettle distribution marked as editable
+pip-audit exit: 0
+
+=== repository security gate ===
+MeshSettle security gate
+UTC: 2026-09-21T15:23:24Z
+==============================================================
+
+[1] no secret files are tracked
+  PASS  .env is not tracked
+  PASS  .env.infra is not tracked
+  PASS  k8s/secret.yaml is not tracked
+  PASS  .env.rate_limit_backup is not tracked
+  PASS  .env is gitignored
+  PASS  .env.infra is gitignored
+  PASS  k8s/secret.yaml is gitignored
+
+[2] no private key material in tracked files
+        k8s/secret.example.yaml has a PEM header with placeholder content (template, fine)
+        tests/unit/test_crypto.py has a PEM header with placeholder content (template, fine)
+  PASS  no real private keys in tracked files
+  PASS  no private key bodies anywhere in git history
+
+[3] no hardcoded credentials in application code
+  PASS  no hardcoded credentials in shared/ or services/
+  PASS  docker-compose.yml does not interpolate credentials from the shell
+  PASS  alembic.ini has no committed database URL
+
+[4] signature verification on every packet-accepting endpoint
+  PASS  mesh_relay verifies the packet signature
+  PASS  bridge verifies the packet signature
+  PASS  settlement verifies the packet signature independently
+  PASS  signature verification precedes the dedupe claim (line 167 < 227)
+  PASS  dedupe claim precedes the settlement write (line 227 < 284)
+
+[5] deduplication uses an atomic operation
+  PASS  dedupe uses SET NX (atomic)
+  PASS  dedupe is not a read-then-write pattern
+  PASS  unique constraint on idempotency_key exists in the model and a migration
+
+[6] rate limiting on public-facing endpoints
+  PASS  sender rate limits 2 endpoint(s)
+  PASS  mesh_relay rate limits 1 endpoint(s)
+  PASS  bridge rate limits 1 endpoint(s)
+  PASS  settlement rate limits 2 endpoint(s)
+  PASS  sender creates its Limiter inside create_app()
+  PASS  mesh_relay creates its Limiter inside create_app()
+  PASS  bridge creates its Limiter inside create_app()
+  PASS  settlement creates its Limiter inside create_app()
+
+[7] external input is validated
+  PASS  10 model(s) reject unknown fields
+  PASS  amounts are bounded and must be positive
+  PASS  identifiers are pattern-constrained
+
+[8] no string-interpolated SQL
+  PASS  no string-interpolated SQL in shared/ or services/
+
+[9] logging cannot leak secrets
+  PASS  log processor redacts secret-looking fields
+  PASS  safe_fingerprint exists for referring to key material without printing it
+  PASS  no log call emits raw signatures or key material
+
+[10] containers run unprivileged
+  PASS  sender Dockerfile drops to a non-root user
+  PASS  mesh_relay Dockerfile drops to a non-root user
+  PASS  bridge Dockerfile drops to a non-root user
+  PASS  settlement Dockerfile drops to a non-root user
+  PASS  k8s deployment sets runAsNonRoot, readOnlyRootFilesystem and drops capabilities
+
+==============================================================
+SECURITY GATE PASSED
+security gate exit: 0

@@ -203,7 +203,7 @@ def create_app() -> FastAPI:
         return _error_response(
             ErrorCode.MALFORMED_PAYLOAD,
             _first_validation_message(exc),
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
         )
 
     @app.get("/healthz", tags=["ops"])

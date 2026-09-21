@@ -4,7 +4,7 @@ This file is the persistent context across sessions. Read it first,
 every time, before doing anything else.
 
 ## Current Phase
-Phase 8: CI and security pass — next
+Phase 9: Minimal demo UI — next
 
 ## Completed Phases
 - Phase 0 — Scaffolding: six root docs, folder tree per ARCHITECTURE.md,
@@ -55,11 +55,47 @@ Phase 8: CI and security pass — next
   `scripts/verify_k8s.sh`. **Verified against a real cluster** (kind
   v0.33.0, Kubernetes v1.37.0), not just dry-run: all 10 checks passed,
   including exactly-once across 5 replicas.
-  Commit `<phase7>` — 2026-09-21
+  Commit `7c4d5ef` — 2026-09-21
+- Phase 8 — CI pipeline and security hardening:
+  `.github/workflows/ci.yml` (5 jobs) and `scripts/security_check.sh`
+  (40 assertions). The security pass found **17 real CVEs** in 4 pinned
+  dependencies, including `cryptography`; all were fixed by upgrading, and
+  the audit is now clean. Suite, compose verification and images all
+  re-verified on the upgraded stack.
+  Commit `<phase8>` — 2026-09-21
 
 ## In Progress
-Nothing in flight. Phase 7 closed, Phase 8 (CI + security pass) not yet
-started.
+Nothing in flight. Phase 8 closed, Phase 9 (demo UI) not yet started.
+
+## CI
+`.github/workflows/ci.yml`, on every push and PR, with
+`cancel-in-progress` concurrency:
+- **lint** — `ruff check` and `black --check` over
+  shared/services/tests/scripts/migrations
+- **test** — the full suite against **real** Postgres 16, Redis 7 and
+  RabbitMQ 3.13 service containers, not skipped. It also asserts each
+  dependency is reachable *before* running, and afterwards fails the job if
+  any `integration`-marked test reported a skip. Without that guard a green
+  run could silently mean the exactly-once and tamper suites never
+  executed, which would make CI actively misleading. Also runs
+  `alembic upgrade head` → `downgrade base` → `upgrade head`.
+- **security** — `pip-audit` plus `scripts/security_check.sh`, with
+  `fetch-depth: 0` so the secret scan can inspect full history (a key
+  committed and later deleted is still leaked)
+- **build** — matrix over the four services, builds each image with GHA
+  layer caching, and asserts the image does not run as uid 0
+- **compose** — generates throwaway env files, validates
+  `docker compose config`, and confirms `.env`/`.env.infra` are gitignored
+
+`./scripts/security_check.sh` is the same gate CI runs, runnable locally.
+40 assertions across 10 areas: no secret files tracked or committed in
+history, no real private keys in tracked content, no hardcoded credentials,
+no shell interpolation of credentials in compose, no DB URL in alembic.ini,
+signature verification on every packet-accepting endpoint **and in the
+right order** (verify before claim, claim before write, checked by line
+number), atomic `SET NX` dedupe plus the unique constraint, rate limiting on
+all four services with per-app limiters, input validation, no
+string-interpolated SQL, log redaction, and non-root containers.
 
 ## Kubernetes
 Files in `k8s/`:
@@ -365,6 +401,38 @@ fixtures (`KeyBundle` with `.signing_private`, `.signing_public`,
   `/usr/local/opt/python@3.12/bin/python3.12` (3.12.9) for the venv
   instead, so we stay on the specified 3.12 line and still satisfy the
   RULES.md requirement to format with black.
+- **The Phase 0 dependency pins were badly out of date and carried 17
+  CVEs.** I pinned versions in Phase 0 from memory; it is now late 2026, so
+  those pins were roughly two years stale. `pip-audit` caught it. Upgraded
+  to `cryptography==50.0.1`, `fastapi==0.141.1`, `starlette==1.6.0`,
+  `black==26.5.1`, `pytest==9.1.1`, `pytest-asyncio==1.4.0`, re-pinned
+  exactly, and re-verified everything. Lesson for later sessions: pinning is
+  right, but the pins must come from a resolver run and an audit, not from
+  recall.
+- **Upgrading `cryptography` on this machine needed a Rust target and an
+  x86_64 OpenSSL.** The host is arm64 but this venv's Python is an x86_64
+  build running under Rosetta (`sysconfig.get_platform()` reports
+  `macosx-14.0-x86_64`), and upstream no longer ships x86_64-macOS wheels
+  past 48.0.1, so pip tried to compile. Fixed with
+  `rustup target add x86_64-apple-darwin` and
+  `OPENSSL_DIR=/usr/local/opt/openssl@3` (plus `OPENSSL_LIB_DIR`,
+  `OPENSSL_INCLUDE_DIR`, `PKG_CONFIG_PATH`). This is a local-environment
+  quirk only: CI (Linux x86_64) and the Docker images get manylinux wheels
+  and need none of it. If a future session hits a cryptography build
+  failure, that env-var set is the fix.
+- **`pip-audit --strict` cannot be combined with `--skip-editable`**: strict
+  treats the skipped editable install of this repo itself as an error, and
+  without `--skip-editable` it errors because `meshsettle` is not on PyPI.
+  CI uses `--skip-editable` alone; the exit code still fails on real
+  findings, which is the behaviour that matters.
+- **The CI Postgres password is a literal in the workflow on purpose.**
+  GitHub Actions service containers need the credential on both sides, the
+  container is created fresh per job and is only reachable from inside that
+  job, so putting it in Actions secrets would be theatre. It is labelled in
+  the workflow as CI-only and is used nowhere else.
+- **`HTTP_422_UNPROCESSABLE_ENTITY` is deprecated** in the new Starlette;
+  switched to `HTTP_422_UNPROCESSABLE_CONTENT`. The two remaining test
+  warnings are third-party (httpx/starlette test client) and not ours.
 - **`kind` was installed to make Phase 7 real** (`brew install kind`,
   v0.33.0). TASK.md allowed writing the manifests and noting that live
   verification was still needed, but kubectl alone cannot validate schemas
@@ -691,6 +759,20 @@ fixtures (`KeyBundle` with `.signing_private`, `.signing_public`,
     packet ids settled twice.** This is the check that justifies the HPA:
     five independent pods, each with its own Redis connection and database
     session, racing on the same keys.
+- **Phase 8 security pass**, raw output in
+  `tests/integration/results/phase8-security-20260921T152310Z.txt`, run
+  2026-09-21T15:23:10Z:
+  - `pip-audit --skip-editable`: **No known vulnerabilities found**, exit 0
+  - `scripts/security_check.sh`: **40 PASS, 0 FAIL**, exit 0
+  - Before the dependency upgrade the same audit reported **17 known
+    vulnerabilities across 4 packages**: `cryptography` 44.0.0 (7
+    advisories), `starlette` 0.41.3 (7), `black` 24.10.0 (2), `pytest`
+    8.3.4 (1). Recorded here because it is the finding that mattered most in
+    this phase, and because the fix is only meaningful next to the problem.
+  - After upgrading, the full suite still passed (263/263, 35.68s), the
+    images rebuilt, and `scripts/verify_compose.sh` passed every check
+    against the upgraded stack (`cryptography 50.0.1, fastapi 0.141.1,
+    starlette 1.6.0` confirmed inside the running container).
 - An earlier load run at 14:12:00Z was discarded rather than kept: its
   baseline counts were taken after an earlier smoke test whose packets were
   still settling, so submissions could not be reconciled against settlements
