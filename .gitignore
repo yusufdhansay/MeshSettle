@@ -24,3 +24,6 @@ node_modules/
 
 # OS / editor
 .DS_Store
+
+# Real k8s Secret, generated locally
+k8s/secret.yaml

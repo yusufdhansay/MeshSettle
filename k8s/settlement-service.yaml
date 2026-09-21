@@ -1,0 +1,24 @@
+# Service for the settlement read API.
+#
+# ClusterIP, not LoadBalancer: this API is read-only and internal. There is no
+# HTTP write path into settlement at all (settlement happens only in response
+# to a queue message), so there is nothing here that needs public exposure.
+# Expose it through an Ingress with authentication if the demo UI is served
+# from outside the cluster.
+apiVersion: v1
+kind: Service
+metadata:
+  name: meshsettle-settlement
+  labels:
+    app.kubernetes.io/name: meshsettle
+    app.kubernetes.io/component: settlement
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: meshsettle
+    app.kubernetes.io/component: settlement
+  ports:
+    - name: http
+      port: 8004
+      targetPort: http
+      protocol: TCP

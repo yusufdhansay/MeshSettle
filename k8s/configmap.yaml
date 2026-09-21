@@ -1,0 +1,44 @@
+# Non-secret configuration for the settlement service.
+#
+# Everything in here is safe to commit. Credentials and private keys live in a
+# Secret instead (see secret.example.yaml) and are never stored in this file.
+#
+# Hostnames assume the dependencies deployed by dependencies.yaml. Point them
+# at managed services by editing this ConfigMap; no image rebuild is needed.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: meshsettle-settlement-config
+  labels:
+    app.kubernetes.io/name: meshsettle
+    app.kubernetes.io/component: settlement
+data:
+  # --- Postgres (host and database only; credentials are in the Secret) ---
+  POSTGRES_HOST: "meshsettle-postgres"
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: "meshsettle"
+
+  # --- Redis ---
+  # No credentials in this URL. If you move to an authenticated Redis, put the
+  # whole URL in the Secret as REDIS_URL instead and drop it from here.
+  REDIS_URL: "redis://meshsettle-redis:6379/0"
+
+  # How long a "already settled" marker is remembered. Sets the window inside
+  # which a redelivered duplicate is rejected without touching Postgres.
+  DEDUPE_TTL_SECONDS: "86400"
+  # How long an in-flight claim is held before being considered abandoned.
+  # Must comfortably exceed the time to settle one packet, but stay short
+  # enough that a crashed pod's claim frees up quickly for a redelivery.
+  DEDUPE_CLAIM_TTL_SECONDS: "60"
+
+  # --- RabbitMQ (host only; credentials are in the Secret) ---
+  RABBITMQ_HOST: "meshsettle-rabbitmq"
+  RABBITMQ_PORT: "5672"
+  SETTLEMENT_QUEUE: "meshsettle.settlements"
+
+  # --- Rate limiting on the read-only HTTP surface ---
+  RATE_LIMIT_PER_MINUTE: "60"
+
+  # --- Logging ---
+  # JSON structured logs to stdout, which is what a cluster log collector wants.
+  LOG_LEVEL: "INFO"

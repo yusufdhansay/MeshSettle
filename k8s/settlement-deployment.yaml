@@ -1,0 +1,183 @@
+# Settlement service Deployment.
+#
+# A Deployment is the right primitive here even though this service is mostly a
+# queue consumer: pods are interchangeable, hold no per-pod state, and can be
+# replaced in any order. Nothing about correctness depends on pod identity,
+# because exactly-once is enforced by the Redis claim and the Postgres unique
+# constraint, not by "only one consumer exists". That is what makes horizontal
+# scaling safe here, and it is the property the HPA relies on.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: meshsettle-settlement
+  labels:
+    app.kubernetes.io/name: meshsettle
+    app.kubernetes.io/component: settlement
+spec:
+  # Starting point only; the HPA owns this value once it is applied.
+  replicas: 2
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: meshsettle
+      app.kubernetes.io/component: settlement
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # Never drop below the desired count during a rollout: the queue keeps
+      # filling while we deploy, and an empty consumer set means growing lag.
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: meshsettle
+        app.kubernetes.io/component: settlement
+    spec:
+      # No API access needed, so do not mount a token.
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      # Give in-flight settlements time to finish. The consumer only acks a
+      # message after its Postgres transaction commits, so an abrupt kill means
+      # the broker redelivers rather than losing the payment; this grace period
+      # simply avoids generating that redelivery work unnecessarily.
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: settlement
+          # Replace with your registry path and an immutable tag or digest.
+          # `local` works with `kind load docker-image`, which is how this is
+          # verified locally.
+          image: meshsettle/settlement:local
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8004
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: meshsettle-settlement-config
+            - secretRef:
+                name: meshsettle-settlement-secrets
+          # Liveness: is the process wedged? /healthz is cheap and does not
+          # depend on Redis or Postgres being up, so a dependency outage does
+          # not cause a restart storm that would make recovery slower.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          # Readiness: should this pod receive traffic to its read API? This
+          # does check dependencies, via the status field, so a pod that cannot
+          # reach Postgres stops serving reads. It keeps consuming either way;
+          # readiness gates the Service, not the queue subscription.
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          # Startup probe gives a slow first boot (migrations already applied
+          # by a Job, but broker connection can take a moment) room to finish
+          # without the liveness probe killing it.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 3
+            failureThreshold: 20
+          resources:
+            # requests must be set for the CPU-based HPA to mean anything: HPA
+            # targets a percentage OF THE REQUEST, so without a request there
+            # is no denominator and the autoscaler cannot compute utilization.
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            # readOnlyRootFilesystem is on, so give the process a writable
+            # /tmp. Nothing else is written to disk.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+# Applies the schema before the consumers start.
+#
+# Runs the same image as the service, so the migration that runs is always the
+# one that matches the code being deployed. In a real pipeline this is a Helm
+# pre-install/pre-upgrade hook or an Argo sync wave; as a plain Job it needs to
+# complete before the Deployment's pods do useful work.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: meshsettle-migrate
+  labels:
+    app.kubernetes.io/name: meshsettle
+    app.kubernetes.io/component: migrate
+spec:
+  backoffLimit: 3
+  # Keep the finished Job around briefly for inspection, then let it go.
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: meshsettle
+        app.kubernetes.io/component: migrate
+    spec:
+      restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          image: meshsettle/settlement:local
+          imagePullPolicy: IfNotPresent
+          command: ["alembic", "upgrade", "head"]
+          envFrom:
+            - configMapRef:
+                name: meshsettle-settlement-config
+            - secretRef:
+                name: meshsettle-settlement-secrets
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

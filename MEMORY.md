@@ -4,7 +4,7 @@ This file is the persistent context across sessions. Read it first,
 every time, before doing anything else.
 
 ## Current Phase
-Phase 7: Kubernetes manifests — next
+Phase 8: CI and security pass — next
 
 ## Completed Phases
 - Phase 0 — Scaffolding: six root docs, folder tree per ARCHITECTURE.md,
@@ -48,11 +48,55 @@ Phase 7: Kubernetes manifests — next
   Ran 50 users for 60s against the compose stack: 10,543 requests, zero
   failures, 176.57 req/s aggregate, p50 140ms, p95 250ms, and exactly-once
   held under load. Raw artifacts in `tests/load/results/`.
-  Commit `<phase6>` — 2026-09-21
+  Commit `c4777f8` — 2026-09-21
+- Phase 7 — Kubernetes manifests for the settlement service: the four
+  files ARCHITECTURE.md specifies plus a Secret template, a dev-only
+  dependencies manifest, `scripts/k8s_secret.sh` and
+  `scripts/verify_k8s.sh`. **Verified against a real cluster** (kind
+  v0.33.0, Kubernetes v1.37.0), not just dry-run: all 10 checks passed,
+  including exactly-once across 5 replicas.
+  Commit `<phase7>` — 2026-09-21
 
 ## In Progress
-Nothing in flight. Phase 6 closed, Phase 7 (Kubernetes manifests) not yet
+Nothing in flight. Phase 7 closed, Phase 8 (CI + security pass) not yet
 started.
+
+## Kubernetes
+Files in `k8s/`:
+- `configmap.yaml` — non-secret config only (hosts, ports, TTLs, rate
+  limit, log level). Safe to commit.
+- `secret.example.yaml` — template with placeholders, no real values.
+  Documents which keys settlement gets and, importantly, which it must not:
+  the sender's signing **private** key is never deployed, because
+  settlement has no business being able to mint packets.
+- `settlement-deployment.yaml` — Deployment (2 replicas to start,
+  `maxUnavailable: 0` so a rollout never empties the consumer set) plus the
+  Alembic migration Job. Non-root uid 1001, `readOnlyRootFilesystem: true`
+  with an emptyDir at /tmp, all capabilities dropped,
+  `automountServiceAccountToken: false`, liveness/readiness/startup probes,
+  and CPU/memory requests (required, or the HPA has no denominator).
+- `settlement-service.yaml` — ClusterIP. Not a LoadBalancer: the API is
+  read-only and internal, and there is no HTTP write path at all.
+- `settlement-hpa.yaml` — autoscaling/v2, 2..10 replicas, CPU 70% and
+  memory 80%, scale up fast (30s window) and down slowly (300s window)
+  because mesh traffic is bursty. A queue-depth External metric is included
+  **commented out**, with the reason: an HPA referencing a metric no
+  adapter serves reports `FailedGetExternalMetric` and then refuses to
+  scale at all, which is worse than scaling on CPU.
+- `dependencies.yaml` — Postgres/Redis/RabbitMQ for local cluster testing
+  only, clearly labelled as such (single replica, emptyDir, no backups).
+  Exists so the manifests can actually be verified.
+
+Scripts:
+- `./scripts/k8s_secret.sh [namespace]` creates the Secret from `.env`, so
+  cluster keys match the ones the sender signs with. Nothing is written to
+  disk and no value is echoed.
+- `./scripts/verify_k8s.sh [--keep]` creates a throwaway kind cluster,
+  installs metrics-server (patched with `--kubelet-insecure-tls`, which kind
+  requires or the HPA reports `<unknown>` forever), loads the image, applies
+  everything, and runs 10 checks. `--keep` leaves the cluster for debugging.
+Requires a built `meshsettle/settlement:local` image (`docker compose build`)
+and a `.env`.
 
 ## Load testing
 `tests/load/locustfile.py` has two user classes, weighted 4:1:
@@ -321,6 +365,28 @@ fixtures (`KeyBundle` with `.signing_private`, `.signing_public`,
   `/usr/local/opt/python@3.12/bin/python3.12` (3.12.9) for the venv
   instead, so we stay on the specified 3.12 line and still satisfy the
   RULES.md requirement to format with black.
+- **`kind` was installed to make Phase 7 real** (`brew install kind`,
+  v0.33.0). TASK.md allowed writing the manifests and noting that live
+  verification was still needed, but kubectl alone cannot validate schemas
+  without an API server, so "correct manifests" would have been an untested
+  claim. A throwaway kind cluster turns it into a verified one.
+- **`k8s/dependencies.yaml` and `k8s/secret.example.yaml` added** beyond the
+  four files in the ARCHITECTURE.md tree. Without in-cluster Postgres, Redis
+  and RabbitMQ the settlement manifests cannot be exercised at all, and
+  without a Secret template there is nothing documenting which keys the
+  service needs. `dependencies.yaml` is explicitly labelled test-only.
+- **Postgres in Kubernetes needs `fsGroup: 70`**: the `postgres:16-alpine`
+  image runs as uid/gid 70, and an emptyDir is mounted root-owned, so
+  `initdb` cannot write and the pod never becomes ready. Diagnosed from the
+  live cluster (pod stuck, no logs available). Setting `fsGroup` makes the
+  kubelet chown the volume and set setgid.
+- **`kind load docker-image` fails for Docker Desktop's multi-platform
+  images** (`content digest ... not found`). The verify script tries
+  `kind load`, falls back to `docker save` plus `kind load image-archive`,
+  and if both fail just lets the node pull, with wait timeouts (600s) that
+  cover a cold pull. An earlier run failed purely because a 180s wait was
+  shorter than the pull time, which looked like a broken manifest but was
+  not.
 - **Internal mesh forwarding shares the relay's public rate-limit bucket**:
   slowapi keys limits by remote address, and the relay forwards hop 2 to
   itself, so with `MESH_HOP_COUNT=2` that internal call counts against the
@@ -604,6 +670,27 @@ fixtures (`KeyBundle` with `.signing_private`, `.signing_public`,
   networking, one relay container standing in for a multi-device mesh, and
   the rate limit lifted. They describe this configuration on this hardware
   and are not a claim about production capacity.
+- **Phase 7 Kubernetes verification against a real cluster**, raw output in
+  `tests/integration/results/phase7-k8s-verification-20260921T145458Z.txt`,
+  run 2026-09-21T14:54:58Z. kind v0.33.0, node image kindest/node:v1.37.0,
+  kubectl v1.36.1. All 10 checks passed, exit code 0:
+  - every manifest parses, and ConfigMap/Deployment+Job/Service were
+    accepted by a live API server via `--dry-run=server`
+  - metrics-server became ready
+  - the Alembic migration Job completed **in-cluster** (`1/1` in 6s)
+  - the settlement Deployment rolled out with **2/2 replicas Ready**
+  - the read API answered through the ClusterIP Service with
+    `{"status":"ok","redis":true,"database":true,"consuming":true}`, so the
+    pods reached Postgres, Redis and the broker
+  - the HPA read **live** metrics rather than `<unknown>`:
+    `cpu: 21%/70%, memory: 56%/80%`, `ScalingActive=True`
+  - 3 copies of one signed packet published to the in-cluster queue across
+    2 replicas → **exactly 1 settlement**, amount 31337 as sealed
+  - **scaled to 5 replicas, published 200 messages (10 distinct packets ×
+    20 copies) → exactly 10 settlements, 0 duplicate idempotency keys, 0
+    packet ids settled twice.** This is the check that justifies the HPA:
+    five independent pods, each with its own Redis connection and database
+    session, racing on the same keys.
 - An earlier load run at 14:12:00Z was discarded rather than kept: its
   baseline counts were taken after an earlier smoke test whose packets were
   still settling, so submissions could not be reconciled against settlements

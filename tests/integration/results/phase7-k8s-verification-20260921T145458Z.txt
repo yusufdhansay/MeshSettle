@@ -1,0 +1,111 @@
+MeshSettle Kubernetes verification
+UTC        : 2026-09-21T14:54:58Z
+kind       : kind v0.33.0 go1.27.0 darwin/amd64
+kubectl    : v1.36.1
+==============================================================
+
+[0] YAML parses
+  PASS  configmap.yaml parses
+  PASS  dependencies.yaml parses
+  PASS  secret.example.yaml parses
+  PASS  settlement-deployment.yaml parses
+  PASS  settlement-hpa.yaml parses
+  PASS  settlement-service.yaml parses
+
+[1] creating kind cluster 'meshsettle'
+Creating cluster "meshsettle" ...
+ • Ensuring node image (kindest/node:v1.37.0) 🖼️  ...
+ ✓ Ensuring node image (kindest/node:v1.37.0) 🖼️
+ • Preparing nodes 📦   ...
+ ✓ Preparing nodes 📦 
+ • Writing configuration 📜  ...
+ ✓ Writing configuration 📜
+ • Starting control-plane 🕹️  ...
+ ✓ Starting control-plane 🕹️
+ • Installing CNI 🔌  ...
+ ✓ Installing CNI 🔌
+ • Installing StorageClass 💾  ...
+ ✓ Installing StorageClass 💾
+ • Waiting ≤ 2m0s for control-plane = Ready ⏳  ...
+ ✓ Waiting ≤ 2m0s for control-plane = Ready ⏳
+ • Ready after 18s 💚
+Set kubectl context to "kind-meshsettle"
+You can now use your cluster with:
+
+kubectl cluster-info --context kind-meshsettle
+
+Have a nice day! 👋
+  PASS  cluster up
+
+[1b] server-side validation of every manifest
+  PASS  configmap.yaml accepted by the API server
+  PASS  settlement-deployment.yaml accepted by the API server
+  PASS  settlement-service.yaml accepted by the API server
+
+[2] installing metrics-server
+  PASS  metrics-server ready
+
+[3] loading images and creating the secret
+Image: "meshsettle/settlement:local" with ID "sha256:e4d46b49db26af178554959a45b91cfcc8e06fa4772a72b7b01a4ac72b2db001" not yet present on node "meshsettle-control-plane", loading...
+  PASS  settlement image loaded into the cluster
+  NOTE  postgres:16-alpine could not be preloaded; the node will pull it
+  NOTE  redis:7-alpine could not be preloaded; the node will pull it
+  NOTE  rabbitmq:3.13 could not be preloaded; the node will pull it
+  NOTE  curlimages/curl:8.11.1 could not be preloaded; the node will pull it
+  PASS  secret created from .env
+
+[4] applying manifests
+  PASS  configmap and dependencies applied
+  waiting for dependencies to be ready (cold image pulls + RabbitMQ boot)...
+  PASS  postgres ready
+  PASS  redis ready
+  PASS  rabbitmq ready
+  PASS  settlement deployment, service and hpa applied
+
+[5] migration Job
+  PASS  alembic upgrade head completed in-cluster
+
+[6] settlement rollout
+  PASS  2 replicas ready
+
+[7] read API through the Service
+  {"status":"ok","service":"settlement","redis":true,"database":true,"consuming":true}pod "meshsettle-probe" deleted from default namespace
+  PASS  Service resolves and the API answers
+  PASS  pods are consuming from the queue
+  PASS  pods can reach Postgres and Redis
+
+[8] HPA acquires real metrics
+  metrics: cpu memory -> current utilization: 63
+  PASS  HPA is reading live CPU and memory metrics
+  PASS  HPA ScalingActive=True
+  meshsettle-settlement   Deployment/meshsettle-settlement   cpu: <unknown>/70%, memory: 63%/80%   2     10    2     33s
+
+[9] publishing a signed packet to the in-cluster queue
+{"idempotency_key": "settle:e9c5a342e51996464dc0f9161a0cdbc47c82642e7eda27a4d634af3ad583f7fb"}
+  settlement rows: 0 -> 1
+  PASS  3 duplicate copies across 2 replicas settled exactly once
+  PASS  settled the exact amount that was sealed (31337)
+
+[10] exactly-once across 5 replicas
+  PASS  scaled to 5 replicas
+  published 200 messages (10 distinct x 20 copies)
+  settlement rows: 1 -> 11 (new: 10, expected 10)
+  PASS  200 messages across 5 replicas settled exactly 10 times
+  PASS  no idempotency key settled twice
+  PASS  no packet id settled twice
+
+==============================================================
+  deployment.apps/meshsettle-postgres     1/1   1     1     4m18s
+  deployment.apps/meshsettle-rabbitmq     1/1   1     1     4m18s
+  deployment.apps/meshsettle-redis        1/1   1     1     4m18s
+  deployment.apps/meshsettle-settlement   5/5   5     5     73s
+  service/meshsettle-postgres     ClusterIP   10.96.216.56    <none>   5432/TCP   4m18s
+  service/meshsettle-rabbitmq     ClusterIP   10.96.130.140   <none>   5672/TCP   4m18s
+  service/meshsettle-redis        ClusterIP   10.96.109.36    <none>   6379/TCP   4m18s
+  service/meshsettle-settlement   ClusterIP   10.96.19.131    <none>   8004/TCP   73s
+  horizontalpodautoscaler.autoscaling/meshsettle-settlement   Deployment/meshsettle-settlement   cpu: 8%/70%, memory: 63%/80%   2     10    5     73s
+  job.batch/meshsettle-migrate   Complete   1/1   8s    73s
+
+ALL KUBERNETES CHECKS PASSED
+
+deleting kind cluster 'meshsettle'...

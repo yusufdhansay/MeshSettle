@@ -1,0 +1,233 @@
+# Postgres, Redis and RabbitMQ for LOCAL CLUSTER TESTING ONLY.
+#
+# This file exists so the settlement manifests can actually be verified against
+# a real cluster. It is NOT a production deployment:
+#
+#   * single replica each, no clustering, no failover
+#   * emptyDir volumes, so all data is lost when a pod restarts
+#   * no backups, no TLS, no resource tuning
+#
+# In a real deployment these are managed services (RDS/Cloud SQL, ElastiCache/
+# MemoryStore, Amazon MQ/CloudAMQP) or properly operated StatefulSets with
+# PersistentVolumeClaims, and you point configmap.yaml at them instead.
+#
+# Credentials come from the same Secret the settlement service uses, so there is
+# one source of truth and they cannot drift.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: meshsettle-postgres
+  labels:
+    app.kubernetes.io/name: meshsettle
+    app.kubernetes.io/component: postgres
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: meshsettle
+    app.kubernetes.io/component: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: meshsettle-postgres
+  labels:
+    app.kubernetes.io/name: meshsettle
+    app.kubernetes.io/component: postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: meshsettle
+      app.kubernetes.io/component: postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: meshsettle
+        app.kubernetes.io/component: postgres
+    spec:
+      automountServiceAccountToken: false
+      # The postgres:16-alpine image runs as uid/gid 70. An emptyDir is mounted
+      # root-owned, so without fsGroup the kubelet leaves the data directory
+      # unwritable and initdb fails with a permission error and the pod never
+      # becomes ready. fsGroup makes the kubelet chown the volume to this group
+      # and set the setgid bit, which is what lets initdb run.
+      securityContext:
+        fsGroup: 70
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: meshsettle-settlement-secrets
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: meshsettle-settlement-secrets
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              valueFrom:
+                configMapKeyRef:
+                  name: meshsettle-settlement-config
+                  key: POSTGRES_DB
+            # The image needs a writable subdirectory when the mount root is
+            # owned by another uid.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"']
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 12
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        # Ephemeral on purpose: this is a test dependency, not a database of
+        # record. See the header.
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: meshsettle-redis
+  labels:
+    app.kubernetes.io/name: meshsettle
+    app.kubernetes.io/component: redis
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: meshsettle
+    app.kubernetes.io/component: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: meshsettle-redis
+  labels:
+    app.kubernetes.io/name: meshsettle
+    app.kubernetes.io/component: redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: meshsettle
+      app.kubernetes.io/component: redis
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: meshsettle
+        app.kubernetes.io/component: redis
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          ports:
+            - name: redis
+              containerPort: 6379
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            failureThreshold: 12
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: meshsettle-rabbitmq
+  labels:
+    app.kubernetes.io/name: meshsettle
+    app.kubernetes.io/component: rabbitmq
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: meshsettle
+    app.kubernetes.io/component: rabbitmq
+  ports:
+    - name: amqp
+      port: 5672
+      targetPort: amqp
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: meshsettle-rabbitmq
+  labels:
+    app.kubernetes.io/name: meshsettle
+    app.kubernetes.io/component: rabbitmq
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: meshsettle
+      app.kubernetes.io/component: rabbitmq
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: meshsettle
+        app.kubernetes.io/component: rabbitmq
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: rabbitmq
+          image: rabbitmq:3.13
+          ports:
+            - name: amqp
+              containerPort: 5672
+          env:
+            - name: RABBITMQ_DEFAULT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: meshsettle-settlement-secrets
+                  key: RABBITMQ_USER
+            - name: RABBITMQ_DEFAULT_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: meshsettle-settlement-secrets
+                  key: RABBITMQ_PASSWORD
+          readinessProbe:
+            exec:
+              command: ["rabbitmq-diagnostics", "-q", "ping"]
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 30
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi

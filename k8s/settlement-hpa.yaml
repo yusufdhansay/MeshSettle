@@ -1,0 +1,93 @@
+# Horizontal Pod Autoscaler for the settlement service.
+#
+# Scaling this service out is safe because exactly-once does not depend on there
+# being a single consumer. Every replica races on the same Redis `SET NX` claim
+# and is backstopped by the Postgres unique constraint, so N replicas settle a
+# duplicated packet exactly once just as one replica does. The concurrency tests
+# assert this directly (50, 100 and 250 simultaneous attempts all settle once),
+# which is what makes autoscaling a correctness-neutral decision here.
+#
+# On the choice of metric: CPU is used because it is verifiable with nothing but
+# metrics-server, which is what a local kind or minikube cluster can run.
+# Queue depth is the better signal for a consumer (it measures the backlog you
+# actually care about, and rises before CPU does), but it requires a custom or
+# external metrics pipeline: Prometheus plus prometheus-adapter, or KEDA with a
+# RabbitMQ scaler. The commented block at the bottom shows the shape that would
+# take. It is commented out rather than shipped broken, because an HPA
+# referencing a metric no server can provide reports
+# `FailedGetExternalMetric` and then refuses to scale at all, which is worse
+# than scaling on CPU.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: meshsettle-settlement
+  labels:
+    app.kubernetes.io/name: meshsettle
+    app.kubernetes.io/component: settlement
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: meshsettle-settlement
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          # Percentage of the pod's CPU *request* (100m), so 70% means ~70m.
+          # Deliberately below 100%: a settlement pod's work is bursty (RSA
+          # unwrap plus a database round trip per packet), and leaving headroom
+          # means a burst is absorbed while new pods start rather than queueing.
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleUp:
+      # React quickly. A growing queue is unsettled payments, and the cost of
+      # over-provisioning briefly is far lower than the cost of lag.
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 30
+        - type: Pods
+          value: 4
+          periodSeconds: 30
+      selectPolicy: Max
+    scaleDown:
+      # Come down slowly. Queue traffic here is spiky by nature (a mesh flushes
+      # a batch of stored packets the moment a device regains connectivity), so
+      # a five-minute window avoids thrashing between bursts.
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60
+      selectPolicy: Min
+# ---
+# Queue-depth scaling, for reference. Requires an external metrics adapter that
+# publishes RabbitMQ queue length (prometheus-adapter reading rabbitmq_exporter,
+# or KEDA). Uncomment only once such an adapter is actually installed.
+#
+#   - type: External
+#     external:
+#       metric:
+#         name: rabbitmq_queue_messages_ready
+#         selector:
+#           matchLabels:
+#             queue: meshsettle.settlements
+#       target:
+#         # Average backlog per replica. With 100, a 1,000-message backlog asks
+#         # for 10 replicas, which is why maxReplicas above is 10.
+#         type: AverageValue
+#         averageValue: "100"
+#
+# The service already exposes what such an adapter would need: GET /metrics
+# returns queue_depth alongside the settled/rejected counters.
