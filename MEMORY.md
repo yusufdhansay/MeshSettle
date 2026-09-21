@@ -62,7 +62,7 @@ Phase 9: Minimal demo UI — next
   dependencies, including `cryptography`; all were fixed by upgrading, and
   the audit is now clean. Suite, compose verification and images all
   re-verified on the upgraded stack.
-  Commit `<phase8>` — 2026-09-21
+  Commit `47221ab` — 2026-09-21
 
 ## In Progress
 Nothing in flight. Phase 8 closed, Phase 9 (demo UI) not yet started.

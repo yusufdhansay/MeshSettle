@@ -254,6 +254,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install the package
+        # bootstrap_env.py generates real keys via shared.crypto, so the
+        # package has to be importable. Runtime deps only; no dev extras needed.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
       - name: Generate throwaway env files
         # docker compose reads .env and .env.infra, which are gitignored. The
         # bootstrap script generates both with fresh keys, so validation runs
