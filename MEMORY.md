@@ -759,6 +759,20 @@ fixtures (`KeyBundle` with `.signing_private`, `.signing_public`,
     packet ids settled twice.** This is the check that justifies the HPA:
     five independent pods, each with its own Redis connection and database
     session, racing on the same keys.
+- **Phase 8 CI verified by an actual GitHub Actions run**, not just locally.
+  Run `35619189056` on commit after `47221ab`, 2026-09-21T15:28:36Z: **all 8
+  jobs green**. Lint 34s, Validate compose 23s, Tests 1m52s, Security 32s,
+  and four image builds (27s to 50s). From the test job's own log:
+  `postgres reachable / redis reachable / rabbitmq reachable`, then
+  `263 passed, 2 warnings in 29.64s`, with
+  `test_fifty_simultaneous_duplicates_settle_exactly_once PASSED` and
+  `test_fifty_corrupted_packets_all_rejected_and_none_settle PASSED`
+  explicitly present. So the exactly-once and tamper guarantees are enforced
+  in CI against real Postgres/Redis/RabbitMQ, not skipped.
+  The first attempt (run `35618819265`) failed one job: the compose
+  validation job ran `bootstrap_env.py` without installing the package
+  (`ModuleNotFoundError: No module named 'shared'`). Fixed by adding
+  setup-python plus `pip install -e .` to that job.
 - **Phase 8 security pass**, raw output in
   `tests/integration/results/phase8-security-20260921T152310Z.txt`, run
   2026-09-21T15:23:10Z:
