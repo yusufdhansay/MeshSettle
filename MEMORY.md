@@ -731,6 +731,13 @@ fixtures (`KeyBundle` with `.signing_private`, `.signing_public`,
   supply a key that disagrees with its own packet to dodge deduplication.
   `PacketCreatedResponse` exposes it as a convenience of that response
   envelope only.
+- **A LICENSE was added on GitHub during Phase 11** (commit `d2c72fc`, MIT),
+  so the Phase 11 push was rejected as non-fast-forward. Resolved by rebasing
+  the single local Phase 11 commit onto `origin/main` rather than merging, to
+  keep history linear; no conflict, since LICENSE is a new file. Re-ran the
+  full suite after the rebase (322 passed) before pushing. If a future session
+  hits the same rejection, check what the remote-only commit is first — do not
+  force-push.
 - **Git remote**: no remote existed. The build prompt requires a push
   after every phase, so a remote is needed. Created the GitHub repo as
   **private** rather than public, since publishing is hard to reverse and
@@ -980,6 +987,12 @@ fixtures (`KeyBundle` with `.signing_private`, `.signing_public`,
   - Regression check: `scripts/verify_compose.sh` **ALL CHECKS PASSED**
     (13 checks), security gate still passes, `pip-audit` still reports
     **No known vulnerabilities found**.
+  - **CI green on GitHub Actions run `35628403392`**, all 9 jobs. The test
+    job's log confirms the new tests actually ran against real infrastructure
+    rather than skipping:
+    `test_packet_just_outside_the_window_is_expired PASSED`,
+    `test_expired_packet_never_reaches_the_redis_claim PASSED`,
+    `test_fifty_unspendable_packets_all_rejected_and_none_settle PASSED`.
 - **Phase 9 demo UI verified live against the running stack**, raw output in
   `tests/integration/results/phase9-ui-verification-20260921T154436Z.txt`,
   run 2026-09-21T15:44:36Z:
