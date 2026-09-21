@@ -4,7 +4,7 @@ This file is the persistent context across sessions. Read it first,
 every time, before doing anything else.
 
 ## Current Phase
-Phase 3: Mesh relay simulation and bridge — next
+Phase 4: Settlement service (the core of the project) — next
 
 ## Completed Phases
 - Phase 0 — Scaffolding: six root docs, folder tree per ARCHITECTURE.md,
@@ -21,11 +21,73 @@ Phase 3: Mesh relay simulation and bridge — next
   `services/sender/app.py` (FastAPI, rate limited, dependency-injected
   keys). 136 unit tests passing. Verified the real env-key path by
   running the service and decrypting a live packet.
-  Commit `<phase2>` — 2026-09-21
+  Commit `7ea2030` — 2026-09-21
+- Phase 3 — Mesh relay and bridge: `services/mesh_relay/app.py`,
+  `services/bridge/publisher.py`, `services/bridge/app.py`, plus the
+  `tests/mesh_harness.py` routing transport. 182 tests passing, including
+  6 against a real RabbitMQ broker in Docker.
+  Commit `<phase3>` — 2026-09-21
 
 ## In Progress
-Nothing in flight. Phase 2 closed, Phase 3 (mesh relay + bridge) not yet
+Nothing in flight. Phase 3 closed, Phase 4 (settlement service) not yet
 started.
+
+## Mesh/bridge API reference (for later phases)
+`services/mesh_relay/app.py`:
+- `create_app()`, `app`, `SERVICE_NAME = "mesh_relay"`
+- `RelayConfig(node_id, next_relay_url, bridge_url, hop_count_target,
+  hop_limit)`, frozen dataclass, with `.from_settings()` and
+  `.next_destination(hop_count) -> (url, PacketStatus)`
+- Dependencies to override in tests: `get_sender_public_key`,
+  `get_relay_config`, `get_http_client`
+- `RelayError(code, detail, http_status)`
+- Routes: `GET /healthz` (reports node_id), `POST /relay` → 202
+  `RelayResponse`. Rejects: 400 INVALID_SIGNATURE, 400 MALFORMED_PAYLOAD
+  (hop limit), 422 MALFORMED_PAYLOAD, 502 INTERNAL_ERROR (next node
+  unreachable or rejected the packet).
+
+`services/bridge/publisher.py`:
+- `Publisher` Protocol: `async publish(body: bytes, *, message_id: str)`
+  plus `queue_name` property
+- `RabbitMQPublisher(url=None, queue=None)` with `.connect()`, `.close()`,
+  `.publish()`. Uses `connect_robust`, `publisher_confirms=True`, durable
+  queue, PERSISTENT delivery mode, default exchange, routing_key = queue.
+- `InMemoryPublisher` records `(body, message_id)` tuples in `.messages`
+- `PublishError` raised when not connected or the broker did not confirm
+
+`services/bridge/app.py`:
+- `create_app()`, `app`, dependencies `get_sender_public_key`,
+  `get_publisher`; `BridgeError(code, detail, http_status)`
+- Routes: `GET /healthz`, `POST /bridge` → 202 `BridgeResponse`.
+  Rejects: 400 INVALID_SIGNATURE, 422 MALFORMED_PAYLOAD, 503
+  INTERNAL_ERROR (broker did not confirm).
+- Re-serializes from the validated model before publishing, so the
+  consumer always receives a canonical schema-valid document.
+
+New `shared/models.py` additions: `RelayResponse(status, node_id,
+hop_count, forwarded_to, packet_id)` and `BridgeResponse(status, queue,
+packet_id, hop_count, idempotency_key)`.
+
+New config: `MESH_HOP_LIMIT` (default 16), `MESH_NODE_ID` (default
+"relay-1"), `MESH_FORWARD_TIMEOUT_SECONDS` (default 5.0).
+
+`tests/mesh_harness.py`: `mesh_client({url_prefix: asgi_app})` returns an
+`httpx.AsyncClient` that dispatches absolute URLs to in-process ASGI apps
+by longest-prefix match. Use this to chain relay → relay → bridge without
+binding sockets.
+
+## Running dependencies locally
+Docker Desktop was not running at session start; started it with
+`open -a Docker`. RabbitMQ for tests:
+`docker run --rm --name meshsettle-rabbit-test --hostname meshrabbit -p 5673:5672 rabbitmq:3.13`
+Takes roughly two minutes to become ready; poll with
+`docker exec meshsettle-rabbit-test rabbitmq-diagnostics -q ping`.
+Do NOT use `rabbitmq:3.13-alpine`: it crashes on startup with
+`Error when reading /var/lib/rabbitmq/.erlang.cookie: eacces`. The
+official Debian-based image with an explicit `--hostname` works.
+Integration tests read `MESHSETTLE_TEST_AMQP_URL` and default to
+`amqp://guest:guest@localhost:5673/`; they skip cleanly when no broker is
+reachable, so a plain `pytest` run needs no Docker.
 
 ## Models API reference (for later phases)
 `shared/models.py`:
@@ -105,6 +167,30 @@ fixtures (`KeyBundle` with `.signing_private`, `.signing_public`,
   `/usr/local/opt/python@3.12/bin/python3.12` (3.12.9) for the venv
   instead, so we stay on the specified 3.12 line and still satisfy the
   RULES.md requirement to format with black.
+- **Relay and bridge verify signatures, not just settlement**:
+  ARCHITECTURE.md says "nothing is trusted or re-derived along the way
+  except at the final settlement service", while RULES.md says "every
+  endpoint that accepts a packet must independently verify the
+  cryptographic signature before doing anything else with the payload".
+  RULES.md wins (it is stated to override defaults), and the two reconcile
+  cleanly: relay and bridge verify so forged packets are dropped early
+  instead of consuming hops and queue space, and settlement still verifies
+  independently and trusts nothing upstream. No node except settlement can
+  decrypt, and no node's verdict is taken on faith by settlement.
+- **`tests/integration/` added**: ARCHITECTURE.md lists only `unit/`,
+  `concurrency/` and `load/` under `tests/`, but TASK.md Phase 3 requires
+  an integration test and Phase 5 requires end-to-end compose
+  verification. Those are neither unit nor concurrency nor load tests, so
+  they get their own directory. Additive; nothing was moved.
+- **Integration tests skip instead of failing when infrastructure is
+  absent**: broker/database-backed tests are marked `integration` and skip
+  when nothing is reachable, so `pytest` stays runnable without Docker
+  while the real paths still get exercised when infrastructure is up. The
+  real-broker path is genuinely covered, not just the in-memory fake.
+- **`InMemoryPublisher` lives in `services/bridge/publisher.py`, not in
+  tests**: it is used by tests, but keeping it beside the Protocol it
+  implements means the two cannot drift, and it lets the demo flow run
+  without a broker.
 - **`shared/logging.py` added**: ARCHITECTURE.md lists only `crypto.py`,
   `models.py`, `config.py` under `shared/`, but RULES.md requires that
   every rejected packet is logged with a reason and that no secret is ever
@@ -174,6 +260,22 @@ fixtures (`KeyBundle` with `.signing_private`, `.signing_public`,
   0 failed. Command: `.venv/bin/python -m pytest tests/unit -q`
   Run 2026-09-21, wall time 4.64s. Confirmed stable in isolation and in
   full-suite order (two consecutive runs, same result).
+- Phase 3 full suite: 182 tests, 182 passed, 0 failed.
+  Command: `.venv/bin/python -m pytest -q`
+  Run 2026-09-21, wall time 6.22s. Includes 40 relay/bridge/mesh-journey
+  tests and 6 real-broker tests against RabbitMQ 3.13 in Docker.
+- Phase 3 multi-hop integrity, measured: a packet was driven through
+  1, 2, 3, 5 and 8 real serialize/HTTP/parse hops
+  (`test_packet_survives_n_hops_unmodified`). At every hop count the
+  signing bytes, signature, envelope and idempotency key were identical to
+  the originals, and the packet still verified. Two copies of the same
+  instruction sent via 1-hop and 4-hop paths produced the same idempotency
+  key.
+- Phase 3 broker behaviour, measured against real RabbitMQ: 5 duplicate
+  publishes of one packet were all delivered (the broker does not dedupe,
+  confirming dedupe must happen in settlement), messages came back with
+  `delivery_mode=PERSISTENT` and `message_id` equal to the idempotency key,
+  and bodies were byte-identical to what was published.
 - Sender rate limit, measured not assumed: with
   `RATE_LIMIT_PER_MINUTE=60`, exactly the first 60 POST `/packets`
   requests returned 201 and request 61 onward returned 429

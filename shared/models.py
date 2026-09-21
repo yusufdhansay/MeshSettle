@@ -441,6 +441,32 @@ class PacketCreatedResponse(BaseModel):
         return cls(packet=packet, idempotency_key=packet.idempotency_key)
 
 
+class RelayResponse(BaseModel):
+    """What a mesh relay node reports after forwarding a packet onward."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: PacketStatus
+    node_id: str
+    hop_count: int
+    #: Where this node forwarded the packet: another relay, or the bridge.
+    forwarded_to: str
+    packet_id: UUID
+
+
+class BridgeResponse(BaseModel):
+    """What the bridge reports once a packet is durably on the queue."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: PacketStatus = PacketStatus.BRIDGED
+    queue: str
+    packet_id: UUID
+    hop_count: int
+    #: Echoed so a caller can correlate, and so the demo UI can show it.
+    idempotency_key: str
+
+
 class ErrorResponse(BaseModel):
     """Uniform error body, so callers can branch on ``code`` not on prose."""
 

@@ -50,9 +50,18 @@ class Settings(BaseSettings):
     settlement_rsa_public_key_pem: str = ""
 
     # --- Mesh simulation ---
+    #: How many device-to-device hops a packet makes before a node with
+    #: connectivity bridges it to the queue.
     mesh_hop_count: int = Field(default=2, ge=0)
+    #: Hard ceiling on recorded hops. Loop protection: a misconfigured or
+    #: malicious relay ring must not be able to circulate a packet forever.
+    mesh_hop_limit: int = Field(default=16, ge=1)
+    #: Identity of this relay node, recorded in each hop record.
+    mesh_node_id: str = "relay-1"
     mesh_relay_url: str = "http://localhost:8002"
     bridge_url: str = "http://localhost:8003"
+    #: Timeout for a single forwarding call between mesh nodes, in seconds.
+    mesh_forward_timeout_seconds: float = Field(default=5.0, gt=0)
 
     # --- Rate limiting ---
     rate_limit_per_minute: int = Field(default=60, ge=1)
