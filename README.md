@@ -1,4 +1,4 @@
-# MeshSettle
+# MeshSettle: UPI without Internet
 
 An offline-first payment settlement simulation. Two devices with no internet
 connection exchange a signed, encrypted payment instruction over a local
